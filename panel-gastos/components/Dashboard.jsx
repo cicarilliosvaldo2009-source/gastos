@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import { Plus, X, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
@@ -46,6 +46,61 @@ function matchCategory(description, rules) {
   return found ? found.category_id : null;
 }
 
+// ---- Importación del "Resumen de cuenta" (CSV) de Mercado Pago ----
+function parseArNumber(raw) {
+  if (raw == null) return null;
+  const t = String(raw).trim().replace(/"/g, "");
+  if (!t) return null;
+  const clean = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
+  const n = parseFloat(clean);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseArDate(raw) {
+  const t = String(raw || "").trim();
+  let m = t.match(/^(\d{2})[-/](\d{2})[-/](\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return null;
+}
+
+// Devuelve { expenses, incomeCount } o null si no parece un resumen de Mercado Pago.
+// Solo toma los movimientos con monto negativo (plata que salió): los ingresos se ignoran.
+function parseMpStatement(text) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+  const headerIdx = lines.findIndex((l) => l.trim().startsWith("RELEASE_DATE"));
+  if (headerIdx === -1) return null;
+  const headers = lines[headerIdx].split(";").map((h) => h.trim());
+  const iDate = headers.indexOf("RELEASE_DATE");
+  const iType = headers.indexOf("TRANSACTION_TYPE");
+  const iRef = headers.indexOf("REFERENCE_ID");
+  const iAmt = headers.indexOf("TRANSACTION_NET_AMOUNT");
+  if (iDate < 0 || iType < 0 || iAmt < 0) return null;
+
+  const seen = {};
+  const expenses = [];
+  let incomeCount = 0;
+  for (const line of lines.slice(headerIdx + 1)) {
+    if (!line.trim()) continue;
+    const cols = line.split(";");
+    const amount = parseArNumber(cols[iAmt]);
+    const date = parseArDate(cols[iDate]);
+    if (amount === null || !date) continue;
+    if (amount >= 0) {
+      incomeCount++;
+      continue;
+    }
+    const description = (cols[iType] || "").trim().replace(/\s+/g, " ");
+    let externalId = iRef >= 0 ? (cols[iRef] || "").trim() : "";
+    if (!externalId) externalId = `${date}|${description}|${amount}`;
+    seen[externalId] = (seen[externalId] || 0) + 1;
+    if (seen[externalId] > 1) externalId = `${externalId}#${seen[externalId]}`;
+    expenses.push({ externalId, date, description, amount: Math.abs(amount) });
+  }
+  return { expenses, incomeCount };
+}
+
 export default function Dashboard() {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
@@ -74,6 +129,19 @@ export default function Dashboard() {
   const [txEditing, setTxEditing] = useState(null);
   const [txEditCategoryId, setTxEditCategoryId] = useState("");
 
+  const [settings, setSettings] = useState(null);
+  const [configModalOpen, setConfigModalOpen] = useState(false);
+  const [limitDraft, setLimitDraft] = useState("");
+  const [savingLimit, setSavingLimit] = useState(false);
+
+  const fileInputRef = useRef(null);
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importRows, setImportRows] = useState([]);
+  const [importInfo, setImportInfo] = useState({ duplicates: 0, incomeCount: 0 });
+  const [importError, setImportError] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importNotice, setImportNotice] = useState("");
+
   useEffect(() => {
     (async () => {
       const {
@@ -92,6 +160,18 @@ export default function Dashboard() {
 
       const { data: rls } = await supabase.from("category_rules").select("*").order("created_at");
       setRules(rls || []);
+
+      let { data: settingsRow } = await supabase.from("settings").select("*").maybeSingle();
+      if (!settingsRow) {
+        const defaultLimit = cats.reduce((s, c) => s + Number(c.budget), 0);
+        const { data: inserted } = await supabase
+          .from("settings")
+          .insert({ monthly_limit: defaultLimit })
+          .select()
+          .single();
+        settingsRow = inserted;
+      }
+      setSettings(settingsRow);
 
       const { data: txs } = await supabase.from("transactions").select("*").order("date", { ascending: false });
       setTransactions(txs || []);
@@ -112,7 +192,8 @@ export default function Dashboard() {
   }, [transactions, viewDate]);
 
   const totalGastado = monthTx.reduce((s, t) => s + Number(t.amount), 0);
-  const presupuestoTotal = categories.reduce((s, c) => s + Number(c.budget), 0);
+  const sumaCategorias = categories.reduce((s, c) => s + Number(c.budget), 0);
+  const presupuestoTotal = settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : sumaCategorias;
   const disponible = presupuestoTotal - totalGastado;
 
   const categorySpend = useMemo(() => {
@@ -257,6 +338,92 @@ export default function Dashboard() {
     setTxEditing(null);
   }
 
+  function openConfig() {
+    setLimitDraft(String(presupuestoTotal));
+    setSyncMessage("");
+    setConfigModalOpen(true);
+  }
+
+  async function saveLimit() {
+    const val = parseFloat(limitDraft);
+    if (!val || val <= 0) return;
+    setSavingLimit(true);
+    const { data, error } = await supabase
+      .from("settings")
+      .update({ monthly_limit: val })
+      .eq("id", settings.id)
+      .select()
+      .single();
+    setSavingLimit(false);
+    if (!error && data) {
+      setSettings(data);
+      setConfigModalOpen(false);
+    }
+  }
+
+  async function handleFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setImportError("");
+    setImportNotice("");
+    let parsed = null;
+    try {
+      parsed = parseMpStatement(await file.text());
+    } catch (err) {
+      parsed = null;
+    }
+    if (!parsed) {
+      setImportRows([]);
+      setImportInfo({ duplicates: 0, incomeCount: 0 });
+      setImportError(
+        "No reconozco este archivo. Tiene que ser el CSV del \"Resumen de cuenta\" de Mercado Pago (con columnas como RELEASE_DATE y TRANSACTION_TYPE)."
+      );
+      setImportModalOpen(true);
+      return;
+    }
+    const known = new Set(transactions.map((t) => t.external_id).filter(Boolean));
+    const fresh = parsed.expenses.filter((r) => !known.has(r.externalId));
+    setImportRows(
+      fresh.map((r) => ({ ...r, categoryId: matchCategory(r.description, rules) || "", selected: true }))
+    );
+    setImportInfo({ duplicates: parsed.expenses.length - fresh.length, incomeCount: parsed.incomeCount });
+    setImportModalOpen(true);
+  }
+
+  function updateImportRow(externalId, patch) {
+    setImportRows((rows) => rows.map((r) => (r.externalId === externalId ? { ...r, ...patch } : r)));
+  }
+
+  async function confirmImport() {
+    const chosen = importRows.filter((r) => r.selected);
+    if (chosen.length === 0) return;
+    setImporting(true);
+    setImportError("");
+    const payload = chosen.map((r) => ({
+      category_id: r.categoryId || null,
+      description: r.description,
+      amount: r.amount,
+      date: r.date,
+      source: "mercadopago",
+      external_id: r.externalId,
+    }));
+    const { data, error } = await supabase.from("transactions").insert(payload).select();
+    setImporting(false);
+    if (error) {
+      setImportError(
+        error.message && error.message.includes("external_id")
+          ? "Falta correr el SQL nuevo en Supabase (la columna external_id). Está en las instrucciones."
+          : "No se pudo importar: " + error.message
+      );
+      return;
+    }
+    setTransactions((prev) => [...(data || []), ...prev]);
+    setImportNotice(`Se importaron ${(data || []).length} gastos de Mercado Pago.`);
+    setImportModalOpen(false);
+    setImportRows([]);
+  }
+
   async function handleLogout() {
     await supabase.auth.signOut();
     router.push("/login");
@@ -328,6 +495,7 @@ export default function Dashboard() {
               <span className="et-section-links">
                 <button className="et-edit-all" onClick={openCategoriesEdit}>Categorías</button>
                 <button className="et-edit-all" onClick={openRulesModal}>Reglas</button>
+                <button className="et-edit-all" onClick={openConfig}>Configuración</button>
               </span>
             </div>
             <div>
@@ -379,7 +547,15 @@ export default function Dashboard() {
               </>
             )}
 
-            <div className="et-section-title">Movimientos</div>
+            <div className="et-section-row">
+              <span className="et-section-title">Movimientos</span>
+              <button className="et-edit-all" onClick={() => fileInputRef.current && fileInputRef.current.click()}>
+                Importar
+              </button>
+            </div>
+            {importNotice && (
+              <p style={{ fontSize: 12.5, color: "var(--accent)", margin: "-6px 0 10px" }}>{importNotice}</p>
+            )}
             {sortedTx.length === 0 ? (
               <div className="et-empty">Todavía no hay gastos cargados en este mes.<br />Tocá "Agregar gasto" para sumar el primero.</div>
             ) : (
@@ -540,6 +716,122 @@ export default function Dashboard() {
                 <Plus size={16} />
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {configModalOpen && (
+        <div className="et-modal-overlay" onClick={() => setConfigModalOpen(false)}>
+          <div className="et-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="et-modal-head">
+              <span className="et-modal-title">Configuración</span>
+              <button className="et-modal-close" aria-label="Cerrar" onClick={() => setConfigModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="et-field">
+              <label className="et-label">MÁXIMO A GASTAR POR MES</label>
+              <input
+                className="et-input et-num"
+                type="number"
+                value={limitDraft}
+                onChange={(e) => setLimitDraft(e.target.value)}
+              />
+            </div>
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: -6, marginBottom: 14 }}>
+              Es el número que se usa para "Presupuesto total" y "Disponible" arriba.
+              No tiene por qué coincidir con la suma de tus categorías (hoy esa suma es {fmt(sumaCategorias)}).
+            </p>
+            <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
+              {savingLimit ? "Guardando…" : "Guardar"}
+            </button>
+
+            <div className="et-subhead">Mercado Pago</div>
+            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
+              Para traer tus gastos de Mercado Pago: descargá el CSV del "Resumen de cuenta" desde mercadopago.com.ar
+              y usá el botón "Importar" que está al lado de "Movimientos". Los gastos que ya habías importado se saltean solos.
+            </p>
+          </div>
+        </div>
+      )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,text/csv,text/plain"
+        style={{ display: "none" }}
+        onChange={handleFile}
+      />
+
+      {importModalOpen && (
+        <div className="et-modal-overlay" onClick={() => !importing && setImportModalOpen(false)}>
+          <div className="et-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="et-modal-head">
+              <span className="et-modal-title">Importar de Mercado Pago</span>
+              <button className="et-modal-close" aria-label="Cerrar" onClick={() => setImportModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {importError && (
+              <p style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5, marginTop: 0 }}>{importError}</p>
+            )}
+
+            {importRows.length > 0 && (
+              <>
+                <p className="et-import-note">
+                  {importRows.length} gastos nuevos
+                  {importInfo.duplicates > 0 ? ` · ${importInfo.duplicates} ya estaban importados` : ""}
+                  {importInfo.incomeCount > 0 ? ` · ${importInfo.incomeCount} ingresos ignorados` : ""}.
+                  Destildá lo que no quieras sumar (por ejemplo, plata que movés entre tus propias cuentas) y elegí
+                  la categoría de los que no se asignaron solos.
+                </p>
+
+                {importRows.map((r) => (
+                  <div className="et-import-row" key={r.externalId}>
+                    <input
+                      className="et-import-check"
+                      type="checkbox"
+                      checked={r.selected}
+                      onChange={(e) => updateImportRow(r.externalId, { selected: e.target.checked })}
+                    />
+                    <div className="et-import-main">
+                      <div className="et-import-desc">{r.description}</div>
+                      <div className="et-import-meta">
+                        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{fmtDate(r.date)}</span>
+                        <select
+                          className="et-import-select"
+                          value={r.categoryId}
+                          onChange={(e) => updateImportRow(r.externalId, { categoryId: e.target.value })}
+                        >
+                          <option value="">Sin categoría</option>
+                          {categories.map((c) => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="et-import-amount et-num">-{fmt(r.amount)}</div>
+                  </div>
+                ))}
+
+                <button
+                  className="et-save-btn"
+                  onClick={confirmImport}
+                  disabled={importing || importRows.filter((r) => r.selected).length === 0}
+                >
+                  {importing ? "Importando…" : `Importar ${importRows.filter((r) => r.selected).length} gastos`}
+                </button>
+              </>
+            )}
+
+            {importRows.length === 0 && !importError && (
+              <p className="et-import-note">
+                No hay gastos nuevos en este archivo
+                {importInfo.duplicates > 0 ? ` (${importInfo.duplicates} ya estaban importados)` : ""}.
+              </p>
+            )}
           </div>
         </div>
       )}
