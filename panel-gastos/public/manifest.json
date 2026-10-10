@@ -1,0 +1,13 @@
+{
+  "name": "Panel de Gastos",
+  "short_name": "Gastos",
+  "description": "Control de gastos personal",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAFAF8",
+  "theme_color": "#3F6659",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
