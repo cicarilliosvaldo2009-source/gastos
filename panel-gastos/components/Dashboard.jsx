@@ -294,7 +294,6 @@ export default function Dashboard() {
           { data: txs, error: transactionsError },
           { data: recurring, error: recurringError },
           { data: budgetRows, error: monthlyBudgetsError },
-          { data: mpSyncRow, error: mpSyncError },
         ] = await Promise.all([
           supabase.from("categories").select("*").order("created_at"),
           supabase.from("category_rules").select("*").order("created_at"),
@@ -302,9 +301,6 @@ export default function Dashboard() {
           supabase.from("transactions").select("*").order("date", { ascending: false }),
           supabase.from("recurring_expenses").select("*").order("created_at"),
           supabase.from("monthly_budgets").select("*").order("month_start"),
-          supabase.from("mercadopago_sync_status")
-            .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
-            .maybeSingle(),
         ]);
 
         const queryError = categoriesError || rulesError || settingsError || transactionsError || recurringError || monthlyBudgetsError;
@@ -354,18 +350,10 @@ export default function Dashboard() {
         setMonthlyBudgets(loadedBudgets);
         setTransactions(txs || []);
         setRecurringExpenses(recurring || []);
-        if (mpSyncError) {
-          console.warn("No se pudo cargar el estado de Mercado Pago:", mpSyncError);
-          setMpSyncStatus(null);
-        } else {
-          setMpSyncStatus(mpSyncRow);
-        }
-        setMpSyncStatusLoading(false);
       } catch (error) {
         console.error("No se pudo cargar el panel:", error);
       } finally {
         if (!cancelled) setLoading(false);
-        setMpSyncStatusLoading(false);
       }
     }
 
@@ -374,6 +362,33 @@ export default function Dashboard() {
       cancelled = true;
     };
   }, [router, supabase]);
+
+  useEffect(() => {
+    if (!configModalOpen || !userId) return;
+    let cancelled = false;
+
+    async function loadMpSyncStatus() {
+      setMpSyncStatusLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from("mercadopago_sync_status")
+          .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
+          .maybeSingle();
+        if (error) throw error;
+        if (!cancelled) setMpSyncStatus(data);
+      } catch (error) {
+        console.warn("No se pudo cargar el estado de Mercado Pago:", error);
+        if (!cancelled) setMpSyncStatus(null);
+      } finally {
+        if (!cancelled) setMpSyncStatusLoading(false);
+      }
+    }
+
+    loadMpSyncStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [configModalOpen, userId, supabase]);
 
   const viewDate = useMemo(() => {
     const now = new Date();
