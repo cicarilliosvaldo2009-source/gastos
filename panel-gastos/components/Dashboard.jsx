@@ -180,6 +180,7 @@ export default function Dashboard() {
   const [transactionView, setTransactionView] = useState("month");
   const [categoriesExpanded, setCategoriesExpanded] = useState(false);
   const [transactionsExpanded, setTransactionsExpanded] = useState(false);
+  const [savingsExpanded, setSavingsExpanded] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -206,6 +207,7 @@ export default function Dashboard() {
   const [settings, setSettings] = useState(null);
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [limitDraft, setLimitDraft] = useState("");
+  const [limitEditing, setLimitEditing] = useState(false);
   const [savingLimit, setSavingLimit] = useState(false);
   const [limitError, setLimitError] = useState("");
 
@@ -333,6 +335,21 @@ export default function Dashboard() {
   const sumaCategorias = categories.reduce((s, c) => s + Number(c.budget), 0);
   const presupuestoTotal = settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : sumaCategorias;
   const disponible = presupuestoTotal - totalGastado;
+
+  const monthlyRemainders = useMemo(() => {
+    return Array.from({ length: 6 }, (_, index) => {
+      const monthKey = monthIsoOffset(-index);
+      const spent = transactions
+        .filter((transaction) => transaction.date.startsWith(monthKey) && !transaction.excluded_from_budget)
+        .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
+      const [year, month] = monthKey.split("-").map(Number);
+      return {
+        key: monthKey,
+        label: fmtMonth(new Date(year, month - 1, 1)),
+        amount: presupuestoTotal - spent,
+      };
+    });
+  }, [transactions, presupuestoTotal]);
 
   const categorySpend = useMemo(() => {
     return categories.map((c) => {
@@ -637,6 +654,7 @@ export default function Dashboard() {
 
   function openConfig() {
     setLimitDraft(String(presupuestoTotal));
+    setLimitEditing(false);
     setLimitError("");
     setConfigModalOpen(true);
   }
@@ -822,6 +840,31 @@ export default function Dashboard() {
                   ))}
                 </div>
               </>
+            )}
+
+            <div className="et-section-row">
+              <button
+                type="button"
+                className="et-edit-all"
+                onClick={() => setSavingsExpanded((expanded) => !expanded)}
+                aria-expanded={savingsExpanded}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, paddingLeft: 0 }}
+              >
+                <span className="et-section-title">Sobrante mes a mes</span>
+                <ChevronDown size={16} style={{ transform: savingsExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
+              </button>
+            </div>
+            {savingsExpanded && (
+              <div style={{ marginBottom: 18 }}>
+                {monthlyRemainders.map((month) => (
+                  <div key={month.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid #E8E6E1" }}>
+                    <span style={{ color: "var(--muted)" }}>{month.label}</span>
+                    <span className="et-num" style={{ color: month.amount >= 0 ? "var(--green)" : "var(--over)" }}>
+                      {month.amount < 0 ? "−" : ""}{fmt(Math.abs(month.amount))}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
 
             <div className="et-section-row">
@@ -1074,26 +1117,32 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="et-subhead">Presupuesto</div>
-            <div className="et-field">
-              <label className="et-label">LÍMITE MENSUAL</label>
-              <input
-                className="et-input et-num"
-                type="number"
-                value={limitDraft}
-                onChange={(e) => setLimitDraft(e.target.value)}
-              />
-            </div>
-            <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
-              {savingLimit ? "Guardando…" : "Guardar"}
-            </button>
-            {limitError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{limitError}</p>}
-
             <div className="et-subhead">Administrar</div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+              <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setLimitEditing((editing) => !editing); setLimitError(""); }} aria-expanded={limitEditing}>
+                {limitEditing ? "Cancelar" : "Cambiar límite"}
+              </button>
               <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openCategoriesEdit(); }}>Categorías</button>
               <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openRulesModal(); }}>Reglas</button>
             </div>
+
+            {limitEditing && (
+              <>
+                <div className="et-field">
+                  <label className="et-label">LÍMITE MENSUAL</label>
+                  <input
+                    className="et-input et-num"
+                    type="number"
+                    value={limitDraft}
+                    onChange={(e) => setLimitDraft(e.target.value)}
+                  />
+                </div>
+                <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
+                  {savingLimit ? "Guardando…" : "Guardar"}
+                </button>
+                {limitError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{limitError}</p>}
+              </>
+            )}
 
             <div className="et-subhead">Tarjeta de crédito</div>
             <button className="et-save-btn" onClick={openCardPlan}>Agregar cuotas</button>
