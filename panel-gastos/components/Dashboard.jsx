@@ -753,6 +753,13 @@ export default function Dashboard() {
       if (error) throw error;
       if (!data) throw new Error("Supabase no confirmó el cambio.");
       setSettings(data);
+      const currentMonthStart = dateForMonth(monthIsoOffset(0), 0);
+      setMonthlyBudgets((previous) => {
+        const current = previous.find((budget) => budget.month_start === currentMonthStart);
+        return current
+          ? previous.map((budget) => budget.month_start === currentMonthStart ? { ...budget, monthly_limit: val } : budget)
+          : [...previous, { month_start: currentMonthStart, monthly_limit: val }].sort((a, b) => a.month_start.localeCompare(b.month_start));
+      });
       setConfigModalOpen(false);
     } catch (error) {
       setLimitError(error.name === "TimeoutError"
