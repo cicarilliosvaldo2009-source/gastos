@@ -31,12 +31,13 @@ const fmtMonth = (date) => {
 };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
-const nextMonthIso = () => {
+const monthIsoOffset = (offset) => {
   const d = new Date();
   d.setDate(1);
-  d.setMonth(d.getMonth() + 1);
+  d.setMonth(d.getMonth() + offset);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
+const nextMonthIso = () => monthIsoOffset(1);
 const dateForMonth = (monthIso, offset) => {
   const [year, month] = monthIso.split("-").map(Number);
   const d = new Date(year, month - 1 + offset, 1);
@@ -214,8 +215,18 @@ export default function Dashboard() {
     amount: "",
     categoryId: "",
     remaining: "",
-    firstMonth: nextMonthIso(),
+    startMonth: nextMonthIso(),
   });
+  const [debitModalOpen, setDebitModalOpen] = useState(false);
+  const [debitSaving, setDebitSaving] = useState(false);
+  const [debitError, setDebitError] = useState("");
+  const [debitForm, setDebitForm] = useState({
+    description: "",
+    amount: "",
+    categoryId: "",
+    startMonth: nextMonthIso(),
+  });
+  const [recurringExpenses, setRecurringExpenses] = useState([]);
 
   const fileInputRef = useRef(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -258,6 +269,8 @@ export default function Dashboard() {
 
       const { data: txs } = await supabase.from("transactions").select("*").order("date", { ascending: false });
       setTransactions(txs || []);
+      const { data: recurring } = await supabase.from("recurring_expenses").select("*").order("created_at");
+      setRecurringExpenses(recurring || []);
       setLoading(false);
     })();
   }, [supabase]);
@@ -459,12 +472,13 @@ export default function Dashboard() {
   }
 
   function openCardPlan() {
+    setConfigModalOpen(false);
     setCardPlanForm({
       description: "",
       amount: "",
       categoryId: categories[0]?.id || "",
       remaining: "",
-      firstMonth: nextMonthIso(),
+      startMonth: nextMonthIso(),
     });
     setCardPlanError("");
     setCardPlanModalOpen(true);
@@ -474,7 +488,7 @@ export default function Dashboard() {
     const amount = Number(String(cardPlanForm.amount).replace(",", "."));
     const remaining = Number.parseInt(cardPlanForm.remaining, 10);
     if (!cardPlanForm.description.trim() || !Number.isFinite(amount) || amount <= 0 ||
-      !Number.isInteger(remaining) || remaining < 1 || remaining > 120 || !cardPlanForm.categoryId || !cardPlanForm.firstMonth) {
+      !Number.isInteger(remaining) || remaining < 1 || remaining > 120 || !cardPlanForm.categoryId || !cardPlanForm.startMonth) {
       setCardPlanError("Completá la descripción, el importe de cada cuota, las cuotas pendientes, la categoría y el primer mes.");
       return;
     }
@@ -486,7 +500,7 @@ export default function Dashboard() {
       category_id: cardPlanForm.categoryId,
       description: cardPlanForm.description.trim(),
       amount,
-      date: dateForMonth(cardPlanForm.firstMonth, index),
+      date: dateForMonth(cardPlanForm.startMonth, index),
       source: "credit_card",
       external_id: `card-installment:${planId}:${index + 1}`,
       installment_plan_id: planId,
@@ -510,6 +524,74 @@ export default function Dashboard() {
     } finally {
       setCardPlanSaving(false);
     }
+  }
+
+  function openDebitModal() {
+    setConfigModalOpen(false);
+    setDebitForm({
+      description: "",
+      amount: "",
+      categoryId: categories[0]?.id || "",
+      startMonth: nextMonthIso(),
+    });
+    setDebitError("");
+    setDebitModalOpen(true);
+  }
+
+  async function addAutomaticDebit() {
+    const amount = Number(String(debitForm.amount).replace(",", "."));
+    if (!debitForm.description.trim() || !Number.isFinite(amount) || amount <= 0 || !debitForm.categoryId || !debitForm.startMonth) {
+      setDebitError("Completá descripción, importe mensual, categoría y mes de inicio.");
+      return;
+    }
+
+    setDebitSaving(true);
+    setDebitError("");
+    try {
+      const { data: debit, error } = await supabase.from("recurring_expenses").insert({
+        description: debitForm.description.trim(),
+        amount,
+        category_id: debitForm.categoryId,
+        start_month: dateForMonth(debitForm.startMonth, 0),
+        active: true,
+      }).select().single().abortSignal(AbortSignal.timeout(15000));
+      if (error) throw error;
+      if (!debit) throw new Error("Supabase no confirmó el débito automático.");
+
+      setRecurringExpenses((prev) => [debit, ...prev]);
+      const currentMonth = dateForMonth(monthIsoOffset(0), 0);
+      if (debit.start_month <= currentMonth) {
+        const { data: createdTransactions, error: transactionError } = await supabase.from("transactions").upsert({
+          recurring_expense_id: debit.id,
+          category_id: debit.category_id,
+          description: debit.description,
+          amount: Number(debit.amount),
+          date: debit.start_month,
+          source: "automatic_debit",
+          external_id: `automatic-debit:${debit.id}:${debit.start_month.slice(0, 7)}`,
+          excluded_from_budget: false,
+          needs_review: false,
+        }, { onConflict: "user_id,external_id", ignoreDuplicates: true }).select().abortSignal(AbortSignal.timeout(15000));
+        if (transactionError) throw transactionError;
+        if (createdTransactions?.length) setTransactions((prev) => [...createdTransactions, ...prev]);
+      }
+
+      setDebitModalOpen(false);
+      setConfigModalOpen(false);
+    } catch (error) {
+      setDebitError(error.name === "TimeoutError"
+        ? "La base de datos tardó demasiado en responder. Intentá otra vez."
+        : `No se pudo guardar el débito: ${error.message || "error de conexión"}`);
+    } finally {
+      setDebitSaving(false);
+    }
+  }
+
+  async function toggleAutomaticDebit(debit) {
+    const { data, error } = await supabase.from("recurring_expenses")
+      .update({ active: !debit.active }).eq("id", debit.id).select().single();
+    if (!error && data) setRecurringExpenses((prev) => prev.map((item) => item.id === data.id ? data : item));
+    else setDebitError(`No se pudo actualizar el débito: ${error?.message || "error"}`);
   }
 
   function openConfig() {
@@ -763,6 +845,7 @@ export default function Dashboard() {
                           <span>{fmtDate(t.date)}{cat ? " · " + cat.name : " · Sin categoría"}</span>
                           {t.source === "mercadopago" && <span className="et-tx-badge-mp">MP</span>}
                           {t.source === "credit_card" && <span className="et-tx-badge-mp">Tarjeta</span>}
+                          {t.source === "automatic_debit" && <span className="et-tx-badge-mp">Débito automático</span>}
                           {t.installment_number && <span className="et-tx-badge-mp">Cuota {t.installment_number}/{t.installment_total}</span>}
                           {t.needs_review && <span className="et-tx-badge-mp">Por revisar</span>}
                           {t.excluded_from_budget && <span className="et-tx-badge-mp">Fuera del presupuesto</span>}
@@ -962,6 +1045,12 @@ export default function Dashboard() {
             </p>
             <button className="et-save-btn" onClick={openCardPlan}>Agregar cuotas</button>
 
+            <div className="et-subhead">Débito automático</div>
+            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
+              Registrá servicios o pagos que se repiten todos los meses, sin una cantidad de cuotas definida.
+            </p>
+            <button className="et-save-btn" onClick={openDebitModal}>Administrar débitos</button>
+
             <div className="et-subhead">Mercado Pago</div>
             <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
               Para cargar gastos de Mercado Pago, descargá el CSV de "Todas las transacciones" y usá "Importar",
@@ -1000,8 +1089,11 @@ export default function Dashboard() {
             </div>
             <div className="et-field">
               <label className="et-label">PRIMER MES A CONTABILIZAR</label>
-              <input className="et-input" type="month" value={cardPlanForm.firstMonth}
-                onChange={(e) => setCardPlanForm({ ...cardPlanForm, firstMonth: e.target.value })} />
+              <select className="et-select" value={cardPlanForm.startMonth}
+                onChange={(e) => setCardPlanForm({ ...cardPlanForm, startMonth: e.target.value })}>
+                <option value={monthIsoOffset(0)}>Este mes</option>
+                <option value={monthIsoOffset(1)}>El próximo mes</option>
+              </select>
             </div>
             <div className="et-field">
               <label className="et-label">CATEGORÍA</label>
@@ -1014,6 +1106,64 @@ export default function Dashboard() {
             <button className="et-save-btn" onClick={addCardPlan} disabled={cardPlanSaving}>
               {cardPlanSaving ? "Guardando…" : "Agregar cuotas"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {debitModalOpen && (
+        <div className="et-modal-overlay" onClick={() => !debitSaving && setDebitModalOpen(false)}>
+          <div className="et-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="et-modal-head">
+              <span className="et-modal-title">Débito automático mensual</span>
+              <button className="et-modal-close" aria-label="Cerrar" onClick={() => setDebitModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
+              Se agregará una vez por mes desde el inicio elegido. Podés pausarlo cuando deje de cobrarse.
+            </p>
+            <div className="et-field">
+              <label className="et-label">DESCRIPCIÓN</label>
+              <input className="et-input" type="text" placeholder="Ej: Internet" value={debitForm.description}
+                onChange={(e) => setDebitForm({ ...debitForm, description: e.target.value })} />
+            </div>
+            <div className="et-field">
+              <label className="et-label">IMPORTE MENSUAL</label>
+              <input className="et-input et-num" type="number" min="0.01" step="0.01" placeholder="0"
+                value={debitForm.amount} onChange={(e) => setDebitForm({ ...debitForm, amount: e.target.value })} />
+            </div>
+            <div className="et-field">
+              <label className="et-label">DESDE CUÁNDO</label>
+              <select className="et-select" value={debitForm.startMonth}
+                onChange={(e) => setDebitForm({ ...debitForm, startMonth: e.target.value })}>
+                <option value={monthIsoOffset(0)}>Este mes</option>
+                <option value={monthIsoOffset(1)}>El próximo mes</option>
+              </select>
+            </div>
+            <div className="et-field">
+              <label className="et-label">CATEGORÍA</label>
+              <select className="et-select" value={debitForm.categoryId}
+                onChange={(e) => setDebitForm({ ...debitForm, categoryId: e.target.value })}>
+                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            {debitError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{debitError}</p>}
+            <button className="et-save-btn" onClick={addAutomaticDebit} disabled={debitSaving}>
+              {debitSaving ? "Guardando…" : "Crear débito automático"}
+            </button>
+
+            <div className="et-subhead">Débitos configurados</div>
+            {recurringExpenses.length === 0 && <p style={{ fontSize: 12.5, color: "var(--muted)" }}>Todavía no agregaste débitos automáticos.</p>}
+            {recurringExpenses.map((debit) => (
+              <div className="et-rule-row" key={debit.id}>
+                <span className="et-rule-text">
+                  <b>{debit.description}</b> · {fmt(debit.amount)} / mes · {debit.active ? "Activo" : "Pausado"}
+                </span>
+                <button className="et-edit-all" onClick={() => toggleAutomaticDebit(debit)}>
+                  {debit.active ? "Pausar" : "Reanudar"}
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       )}
