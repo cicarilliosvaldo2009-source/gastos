@@ -182,6 +182,9 @@ export default function Dashboard() {
 
   const [txEditing, setTxEditing] = useState(null);
   const [txEditCategoryId, setTxEditCategoryId] = useState("");
+  const [txEditExcluded, setTxEditExcluded] = useState(false);
+  const [txEditError, setTxEditError] = useState("");
+  const [savingTxEdit, setSavingTxEdit] = useState(false);
 
   const [settings, setSettings] = useState(null);
   const [configModalOpen, setConfigModalOpen] = useState(false);
@@ -246,18 +249,19 @@ export default function Dashboard() {
     });
   }, [transactions, viewDate]);
 
-  const totalGastado = monthTx.reduce((s, t) => s + Number(t.amount), 0);
+  const budgetTx = useMemo(() => monthTx.filter((t) => !t.excluded_from_budget), [monthTx]);
+  const totalGastado = budgetTx.reduce((s, t) => s + Number(t.amount), 0);
   const sumaCategorias = categories.reduce((s, c) => s + Number(c.budget), 0);
   const presupuestoTotal = settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : sumaCategorias;
   const disponible = presupuestoTotal - totalGastado;
 
   const categorySpend = useMemo(() => {
     return categories.map((c) => {
-      const spent = monthTx.filter((t) => t.category_id === c.id).reduce((s, t) => s + Number(t.amount), 0);
+      const spent = budgetTx.filter((t) => t.category_id === c.id).reduce((s, t) => s + Number(t.amount), 0);
       const pct = c.budget > 0 ? Math.round((spent / c.budget) * 100) : 0;
       return { ...c, spent, pct, status: statusFor(pct) };
     });
-  }, [categories, monthTx]);
+  }, [categories, budgetTx]);
 
   const alerts = useMemo(() => {
     const over = categorySpend.filter((c) => c.status === "over");
@@ -378,19 +382,32 @@ export default function Dashboard() {
   function openTxEdit(t) {
     setTxEditing(t);
     setTxEditCategoryId(t.category_id || "");
+    setTxEditExcluded(Boolean(t.excluded_from_budget));
+    setTxEditError("");
   }
 
   async function saveTxCategory() {
-    const { data, error } = await supabase
-      .from("transactions")
-      .update({ category_id: txEditCategoryId || null })
-      .eq("id", txEditing.id)
-      .select()
-      .single();
-    if (!error && data) {
+    setSavingTxEdit(true);
+    setTxEditError("");
+    try {
+      const { data, error } = await supabase
+        .from("transactions")
+        .update({ category_id: txEditCategoryId || null, excluded_from_budget: txEditExcluded })
+        .eq("id", txEditing.id)
+        .select()
+        .single()
+        .abortSignal(AbortSignal.timeout(15000));
+      if (error) throw error;
+      if (!data) throw new Error("Supabase no confirmó el cambio.");
       setTransactions((prev) => prev.map((t) => (t.id === data.id ? data : t)));
+      setTxEditing(null);
+    } catch (error) {
+      setTxEditError(error.name === "TimeoutError"
+        ? "La base de datos tardó demasiado en responder. Intentá otra vez."
+        : `No se pudo guardar: ${error.message || "error de conexión"}`);
+    } finally {
+      setSavingTxEdit(false);
     }
-    setTxEditing(null);
   }
 
   function openConfig() {
@@ -633,6 +650,7 @@ export default function Dashboard() {
                         <div className="et-tx-meta">
                           <span>{fmtDate(t.date)}{cat ? " · " + cat.name : " · Sin categoría"}</span>
                           {t.source === "mercadopago" && <span className="et-tx-badge-mp">MP</span>}
+                          {t.excluded_from_budget && <span className="et-tx-badge-mp">Fuera del presupuesto</span>}
                         </div>
                       </div>
                       <div className="et-tx-amount et-num">-{fmt(t.amount)}</div>
@@ -928,7 +946,19 @@ export default function Dashboard() {
                 {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
-            <button className="et-save-btn" onClick={saveTxCategory}>Guardar</button>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 13, color: "var(--muted)", lineHeight: 1.45, margin: "8px 0 16px" }}>
+              <input
+                type="checkbox"
+                className="et-import-check"
+                checked={txEditExcluded}
+                onChange={(e) => setTxEditExcluded(e.target.checked)}
+              />
+              <span>Excluir del presupuesto y de los totales. El movimiento seguirá guardado y visible.</span>
+            </label>
+            {txEditError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{txEditError}</p>}
+            <button className="et-save-btn" onClick={saveTxCategory} disabled={savingTxEdit}>
+              {savingTxEdit ? "Guardando…" : "Guardar"}
+            </button>
           </div>
         </div>
       )}
