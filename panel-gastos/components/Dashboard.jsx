@@ -473,7 +473,6 @@ export default function Dashboard() {
       projectedSpent,
       limit,
       projectedRemainder: limit === null ? null : limit - projectedSpent,
-      monthStart,
     };
   }, [transactions, monthlyBudgets, settings]);
 
@@ -1445,6 +1444,13 @@ export default function Dashboard() {
                 </>
               )}
             </div>
+            <button
+              type="button"
+              className="et-menu-btn et-import-settings-btn"
+              onClick={() => { setConfigModalOpen(false); fileInputRef.current?.click(); }}
+            >
+              Importar reporte de Mercado Pago
+            </button>
           </div>
         </div>
       )}
