@@ -159,11 +159,20 @@ html, body { margin: 0; padding: 0; background: #FAFAF8; }
 .et-menu-btn:hover { filter: brightness(1.08); }
 .et-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
 .et-settings-grid .et-menu-btn:first-child { grid-column: 1 / -1; }
-.et-month-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--border); margin-bottom: 8px; }
-.et-month-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 5px; padding: 10px 7px; }
-.et-month-summary > div + div { border-left: 1px solid var(--border); }
-.et-month-summary span { color: var(--muted); font-size: 9px; letter-spacing: .35px; white-space: nowrap; }
-.et-month-summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.et-quick-categories { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 9px; }
+.et-category-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font: 600 11px 'Manrope', sans-serif; cursor: pointer; }
+.et-category-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.et-category-chip .et-dot { width: 6px; height: 6px; }
+.et-category-chip small { color: var(--muted); font-size: 9px; font-weight: 500; }
+.et-sync-card { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); font-size: 12px; }
+.et-sync-status-line { display: flex; align-items: center; gap: 7px; }
+.et-sync-status-line strong { font-size: 12px; font-weight: 600; }
+.et-sync-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.et-sync-dot.success { background: #4A8577; }
+.et-sync-dot.error { background: var(--over); }
+.et-sync-meta, .et-sync-counts { margin-top: 5px; color: var(--muted); font-size: 11px; }
+.et-sync-message { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.et-sync-muted { color: var(--muted); }
 .et-remainder-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .et-remainder-row > span:first-child { color: var(--muted); }
 .et-remainder-row small { font-family: 'Manrope', sans-serif; font-size: 10px; color: var(--muted); }
