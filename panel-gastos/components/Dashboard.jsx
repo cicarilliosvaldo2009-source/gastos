@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
-import { Plus, X, Trash2, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
+import { Plus, X, Trash2, ChevronLeft, ChevronRight, ChevronDown, Settings } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const NEW_CATEGORY_COLORS = [
@@ -200,7 +200,7 @@ export default function Dashboard() {
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [categoriesExpanded, setCategoriesExpanded] = useState(false);
   const [transactionsExpanded, setTransactionsExpanded] = useState(false);
-  const [savingsExpanded, setSavingsExpanded] = useState(false);
+  const [savingsModalOpen, setSavingsModalOpen] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -436,11 +436,46 @@ export default function Dashboard() {
       return {
         key: monthKey,
         label: fmtMonth(new Date(year, month - 1, 1)),
+        spent,
         limit: budget ? Number(budget.monthly_limit) : null,
         amount: budget ? Number(budget.monthly_limit) - spent : null,
       };
     });
   }, [transactions, monthlyBudgets]);
+
+  const savingsScale = Math.max(
+    1,
+    ...monthlyRemainders.map((month) => Math.max(month.spent, month.limit || 0))
+  );
+
+  const currentMonthProjection = useMemo(() => {
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const spent = transactions
+      .filter((transaction) => transaction.date.startsWith(monthKey) && !transaction.excluded_from_budget)
+      .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const daysElapsed = now.getDate();
+    const projectedSpent = daysElapsed > 0 ? Math.round((spent / daysElapsed) * daysInMonth) : 0;
+    const monthStart = `${monthKey}-01`;
+    const budget = monthlyBudgets
+      .filter((item) => item.month_start.slice(0, 7) <= monthKey)
+      .sort((a, b) => b.month_start.localeCompare(a.month_start))[0];
+    const limit = budget
+      ? Number(budget.monthly_limit)
+      : settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : null;
+
+    return {
+      monthKey,
+      spent,
+      daysElapsed,
+      daysInMonth,
+      projectedSpent,
+      limit,
+      projectedRemainder: limit === null ? null : limit - projectedSpent,
+      monthStart,
+    };
+  }, [transactions, monthlyBudgets, settings]);
 
   const categorySpend = useMemo(() => {
     return categories.map((c) => {
@@ -974,6 +1009,9 @@ export default function Dashboard() {
               <button className="et-nav-btn" aria-label="Mes siguiente" onClick={() => setMonthOffset((m) => m + 1)}>
                 <ChevronRight size={16} />
               </button>
+              <button type="button" className="et-nav-btn et-settings-trigger" aria-label="Configuración" title="Configuración" onClick={openConfig}>
+                <Settings size={17} />
+              </button>
             </div>
 
             <div className="et-hero">
@@ -1028,36 +1066,6 @@ export default function Dashboard() {
               <button
                 type="button"
                 className="et-edit-all"
-                onClick={() => setSavingsExpanded((expanded) => !expanded)}
-                aria-expanded={savingsExpanded}
-                style={{ display: "inline-flex", alignItems: "center", gap: 6, paddingLeft: 0 }}
-              >
-                <span className="et-section-title">Sobrante mes a mes</span>
-                <ChevronDown size={16} style={{ transform: savingsExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
-              </button>
-            </div>
-            {savingsExpanded && (
-              <div style={{ marginBottom: 18 }}>
-                {monthlyRemainders.map((month) => (
-                  <div key={month.key} className="et-remainder-row">
-                    <span>{month.label}</span>
-                    {month.amount === null ? (
-                      <span className="et-remainder-unknown">Sin registro</span>
-                    ) : (
-                      <span className="et-num" style={{ color: month.amount >= 0 ? "var(--accent)" : "var(--over)" }}>
-                        {month.amount < 0 ? "−" : ""}{fmt(Math.abs(month.amount))}
-                        <small>{month.amount >= 0 ? " sobrante" : " excedido"}</small>
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="et-section-row">
-              <button
-                type="button"
-                className="et-edit-all"
                 onClick={() => setCategoriesExpanded((expanded) => !expanded)}
                 aria-expanded={categoriesExpanded}
                 style={{ display: "inline-flex", alignItems: "center", gap: 6, paddingLeft: 0 }}
@@ -1065,9 +1073,6 @@ export default function Dashboard() {
                 <span className="et-section-title">Presupuestos por categoría</span>
                 <ChevronDown size={16} style={{ transform: categoriesExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
               </button>
-              <span className="et-section-links">
-                <button className="et-edit-all" onClick={openConfig}>Configuración</button>
-              </span>
             </div>
             {categoriesExpanded && (
             <div>
@@ -1105,16 +1110,16 @@ export default function Dashboard() {
                 <span className="et-section-title">Movimientos</span>
                 <ChevronDown size={16} style={{ transform: transactionsExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
               </button>
-              <button className="et-edit-all" onClick={() => fileInputRef.current && fileInputRef.current.click()}>
-                Importar
-              </button>
             </div>
             {transactionsExpanded && <>
             <div style={{ display: "flex", gap: 8, margin: "-4px 0 14px" }}>
-              <button className="et-edit-all" onClick={() => setTransactionView("month")} aria-pressed={transactionView === "month"}>Este mes</button>
-              <button className="et-edit-all" onClick={() => setTransactionView("review")} aria-pressed={transactionView === "review"}>
-                Por revisar{pendingReviewTx.length ? ` (${pendingReviewTx.length})` : ""}
-              </button>
+              {transactionView === "month" ? (
+                <button className="et-edit-all" onClick={() => setTransactionView("review")}>
+                  Por revisar{pendingReviewTx.length ? ` (${pendingReviewTx.length})` : ""}
+                </button>
+              ) : (
+                <button className="et-edit-all" onClick={() => setTransactionView("month")}>Este mes</button>
+              )}
               <button className="et-edit-all" onClick={() => setFiltersExpanded((expanded) => !expanded)}
                 aria-expanded={filtersExpanded}>Buscar{hasTransactionFilters ? " ·" : ""}</button>
             </div>
@@ -1375,6 +1380,44 @@ export default function Dashboard() {
             <div className="et-subhead">Débito automático</div>
             <button className="et-menu-btn" onClick={openDebitModal}>Administrar débitos</button>
 
+            <div className="et-subhead">Sobrante mes a mes</div>
+            <button className="et-menu-btn" onClick={() => { setConfigModalOpen(false); setSavingsModalOpen(true); }}>
+              Ver gastos por mes
+            </button>
+
+            <div className="et-subhead">Proyección del mes</div>
+            <div className="et-projection-card">
+              <span className="et-projection-label">A este ritmo, terminarías gastando</span>
+              {currentMonthProjection.spent > 0 ? (
+                <>
+                  <strong className="et-projection-amount et-num">~{fmt(currentMonthProjection.projectedSpent)}</strong>
+                  <span className="et-projection-note">
+                    Estimación basada en {currentMonthProjection.daysElapsed} de {currentMonthProjection.daysInMonth} días.
+                  </span>
+                  {currentMonthProjection.limit !== null && (
+                    <>
+                      <div className="et-projection-track">
+                        <div
+                          className="et-projection-fill"
+                          style={{
+                            width: `${Math.min((currentMonthProjection.projectedSpent / currentMonthProjection.limit) * 100, 100)}%`,
+                            background: currentMonthProjection.projectedRemainder < 0 ? "var(--over)" : "var(--accent)",
+                          }}
+                        />
+                      </div>
+                      <span className="et-projection-balance" style={{ color: currentMonthProjection.projectedRemainder < 0 ? "var(--over)" : "var(--accent)" }}>
+                        {currentMonthProjection.projectedRemainder < 0
+                          ? `Superarías el límite por ${fmt(Math.abs(currentMonthProjection.projectedRemainder))}`
+                          : `Quedarían ${fmt(currentMonthProjection.projectedRemainder)} disponibles`}
+                      </span>
+                    </>
+                  )}
+                </>
+              ) : (
+                <span className="et-projection-note">Todavía no hay gastos cargados este mes para estimar.</span>
+              )}
+            </div>
+
             <div className="et-subhead">Mercado Pago</div>
             <div className="et-sync-card" role="status" aria-live="polite">
               {mpSyncStatusLoading ? (
@@ -1401,6 +1444,52 @@ export default function Dashboard() {
                   {mpSyncStatus.last_message && <p className="et-sync-message">{mpSyncStatus.last_message}</p>}
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {savingsModalOpen && (
+        <div className="et-modal-overlay" onClick={() => setSavingsModalOpen(false)}>
+          <div className="et-modal et-savings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="et-modal-head">
+              <span className="et-modal-title">Sobrante mes a mes</span>
+              <button className="et-modal-close" aria-label="Cerrar" onClick={() => setSavingsModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="et-savings-chart">
+              {monthlyRemainders.map((month) => (
+                <div className="et-savings-month" key={month.key}>
+                  <div className="et-savings-head">
+                    <span>{month.label}</span>
+                    <strong className="et-num">{fmt(month.spent)}</strong>
+                  </div>
+                  <div className="et-savings-track">
+                    <div
+                      className="et-savings-fill"
+                      style={{
+                        width: `${Math.min((month.spent / savingsScale) * 100, 100)}%`,
+                        background: month.amount !== null && month.amount < 0 ? "var(--over)" : "var(--accent)",
+                      }}
+                    />
+                    {month.limit !== null && (
+                      <span className="et-savings-budget-marker" style={{ left: `${Math.min((month.limit / savingsScale) * 100, 100)}%` }} />
+                    )}
+                  </div>
+                  <div className="et-savings-meta">
+                    <span>{month.limit === null ? "Sin límite guardado" : `Límite: ${fmt(month.limit)}`}</span>
+                    {month.amount !== null && (
+                      <strong className="et-num" style={{ color: month.amount < 0 ? "var(--over)" : "var(--accent)" }}>
+                        {month.amount < 0 ? `Excedido ${fmt(Math.abs(month.amount))}` : `Sobrante ${fmt(month.amount)}`}
+                      </strong>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="et-savings-legend">
+              <span><i className="et-savings-legend-fill" /> Gastado</span>
+              <span><i className="et-savings-legend-marker" /> Límite mensual</span>
             </div>
           </div>
         </div>
