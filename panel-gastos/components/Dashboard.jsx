@@ -364,10 +364,12 @@ export default function Dashboard() {
   const viewBudget = monthlyBudgets
     .filter((budget) => budget.month_start.slice(0, 7) <= viewMonthKey)
     .sort((a, b) => b.month_start.localeCompare(a.month_start))[0];
+  const earliestBudgetMonth = monthlyBudgets[0]?.month_start.slice(0, 7);
+  const noHistoricalBudget = Boolean(earliestBudgetMonth && viewMonthKey < earliestBudgetMonth);
   const presupuestoTotal = viewBudget
     ? Number(viewBudget.monthly_limit)
-    : settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : sumaCategorias;
-  const disponible = presupuestoTotal - totalGastado;
+    : noHistoricalBudget ? null : settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : sumaCategorias;
+  const disponible = presupuestoTotal === null ? null : presupuestoTotal - totalGastado;
 
   const monthlyRemainders = useMemo(() => {
     return Array.from({ length: 6 }, (_, index) => {
@@ -729,7 +731,7 @@ export default function Dashboard() {
   }
 
   function openConfig() {
-    setLimitDraft(String(presupuestoTotal));
+    setLimitDraft(String(settings?.monthly_limit > 0 ? settings.monthly_limit : sumaCategorias));
     setLimitEditing(false);
     setLimitError("");
     setConfigModalOpen(true);
@@ -879,7 +881,7 @@ export default function Dashboard() {
 
             <div className="et-hero">
               <div className="et-hero-label">Te queda para gastar</div>
-              <div className="et-hero-amount et-num">{fmt(disponible)}</div>
+              <div className="et-hero-amount et-num">{disponible === null ? "—" : fmt(disponible)}</div>
             </div>
 
             <div className="et-stats">
@@ -889,7 +891,7 @@ export default function Dashboard() {
               </div>
               <div className="et-stat">
                 <div className="et-stat-top">PRESUPUESTO TOTAL</div>
-                <div className="et-stat-amount et-num">{fmt(presupuestoTotal)}</div>
+                <div className="et-stat-amount et-num">{presupuestoTotal === null ? "—" : fmt(presupuestoTotal)}</div>
               </div>
             </div>
 
@@ -899,7 +901,7 @@ export default function Dashboard() {
               <div>
                 <span>VS. MES ANTERIOR</span>
                 <strong style={{ color: comparisonPct === null ? "var(--muted)" : comparisonPct > 0 ? "var(--over)" : comparisonPct < 0 ? "var(--accent)" : "var(--muted)" }}>
-                  {comparisonPct === null ? "—" : `${comparisonPct > 0 ? "+" : ""}${comparisonPct}%`}
+                  {comparisonPct === null ? "—" : `${comparisonPct > 0 ? "↑ " : comparisonPct < 0 ? "↓ " : ""}${Math.abs(comparisonPct)}%`}
                 </strong>
               </div>
             </div>
