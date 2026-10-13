@@ -88,6 +88,9 @@ html, body { margin: 0; padding: 0; background: #FAFAF8; }
 .et-manage-input:focus { outline: none; border-color: var(--accent); }
 .et-delete-btn { background: none; border: none; color: var(--faint); cursor: pointer; padding: 4px; display: flex; flex-shrink: 0; }
 .et-delete-btn:hover { color: var(--over); }
+.et-delete-movement { width: 100%; min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 8px; border: 1px solid #E7C7C3; border-radius: 10px; background: #FFF9F8; color: var(--over); font: 600 13px 'Manrope', sans-serif; cursor: pointer; }
+.et-delete-movement:hover { background: #FCEFED; }
+.et-delete-movement:disabled { opacity: .55; cursor: default; }
 
 .et-subhead { font-size: 11.5px; color: var(--muted); letter-spacing: 0.4px; text-transform: uppercase; margin: 22px 0 10px; }
 .et-add-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
