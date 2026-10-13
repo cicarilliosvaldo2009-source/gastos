@@ -25,6 +25,14 @@ const fmt = (n) =>
 const fmtDate = (isoDate) =>
   new Intl.DateTimeFormat("es-AR", { day: "2-digit", month: "short" }).format(new Date(isoDate + "T00:00:00"));
 
+const fmtDateTime = (dateTime) => dateTime
+  ? new Intl.DateTimeFormat("es-AR", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone: "America/Argentina/Buenos_Aires",
+  }).format(new Date(dateTime))
+  : "";
+
 const fmtMonth = (date) => {
   const s = new Intl.DateTimeFormat("es-AR", { month: "long", year: "numeric" }).format(date);
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -173,6 +181,10 @@ export default function Dashboard() {
 
   const [loading, setLoading] = useState(true);
   const [userEmail, setUserEmail] = useState("");
+  const [userId, setUserId] = useState("");
+  const [lastCategoryId, setLastCategoryId] = useState("");
+  const [mpSyncStatus, setMpSyncStatus] = useState(null);
+  const [mpSyncStatusLoading, setMpSyncStatusLoading] = useState(true);
   const [categories, setCategories] = useState([]);
   const [rules, setRules] = useState([]);
   const [transactions, setTransactions] = useState([]);
@@ -266,6 +278,12 @@ export default function Dashboard() {
         if (cancelled) return;
 
         setUserEmail(user.email || "");
+        setUserId(user.id);
+        try {
+          setLastCategoryId(window.localStorage.getItem(`panel-gastos:last-category:${user.id}`) || "");
+        } catch {
+          setLastCategoryId("");
+        }
 
         // Estas lecturas son independientes: ejecutarlas juntas evita esperar
         // una ida y vuelta a Supabase por cada sección del panel.
@@ -276,6 +294,7 @@ export default function Dashboard() {
           { data: txs, error: transactionsError },
           { data: recurring, error: recurringError },
           { data: budgetRows, error: monthlyBudgetsError },
+          { data: mpSyncRow, error: mpSyncError },
         ] = await Promise.all([
           supabase.from("categories").select("*").order("created_at"),
           supabase.from("category_rules").select("*").order("created_at"),
@@ -283,6 +302,9 @@ export default function Dashboard() {
           supabase.from("transactions").select("*").order("date", { ascending: false }),
           supabase.from("recurring_expenses").select("*").order("created_at"),
           supabase.from("monthly_budgets").select("*").order("month_start"),
+          supabase.from("mercadopago_sync_status")
+            .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
+            .maybeSingle(),
         ]);
 
         const queryError = categoriesError || rulesError || settingsError || transactionsError || recurringError || monthlyBudgetsError;
@@ -332,10 +354,18 @@ export default function Dashboard() {
         setMonthlyBudgets(loadedBudgets);
         setTransactions(txs || []);
         setRecurringExpenses(recurring || []);
+        if (mpSyncError) {
+          console.warn("No se pudo cargar el estado de Mercado Pago:", mpSyncError);
+          setMpSyncStatus(null);
+        } else {
+          setMpSyncStatus(mpSyncRow);
+        }
+        setMpSyncStatusLoading(false);
       } catch (error) {
         console.error("No se pudo cargar el panel:", error);
       } finally {
         if (!cancelled) setLoading(false);
+        setMpSyncStatusLoading(false);
       }
     }
 
@@ -398,16 +428,27 @@ export default function Dashboard() {
     });
   }, [categories, budgetTx]);
 
-  const previousMonthDate = new Date(viewDate.getFullYear(), viewDate.getMonth() - 1, 1);
-  const previousMonthKey = `${previousMonthDate.getFullYear()}-${String(previousMonthDate.getMonth() + 1).padStart(2, "0")}`;
-  const previousMonthSpent = transactions
-    .filter((transaction) => transaction.date.startsWith(previousMonthKey) && !transaction.excluded_from_budget)
-    .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
-  const largestCategory = categorySpend.reduce((largest, category) => category.spent > (largest?.spent || 0) ? category : largest, null);
-  const comparisonAmount = totalGastado - previousMonthSpent;
-  const comparisonPct = previousMonthSpent > 0
-    ? Math.round((comparisonAmount / previousMonthSpent) * 100)
-    : null;
+  const frequentCategories = useMemo(() => {
+    const usage = new Map();
+    transactions.forEach((transaction) => {
+      if (transaction.category_id && !transaction.excluded_from_budget) {
+        usage.set(transaction.category_id, (usage.get(transaction.category_id) || 0) + 1);
+      }
+    });
+    return categories
+      .map((category) => ({ ...category, usage: usage.get(category.id) || 0 }))
+      .filter((category) => category.usage > 0)
+      .sort((a, b) => b.usage - a.usage)
+      .slice(0, 3);
+  }, [transactions, categories]);
+
+  const quickAddCategories = useMemo(() => {
+    const orderedIds = [lastCategoryId, ...frequentCategories.map((category) => category.id), ...categories.map((category) => category.id)];
+    return [...new Set(orderedIds)]
+      .map((id) => categories.find((category) => category.id === id))
+      .filter(Boolean)
+      .slice(0, 4);
+  }, [lastCategoryId, frequentCategories, categories]);
 
   const chartData = categorySpend.filter((c) => c.spent > 0).map((c) => ({
     name: c.name,
@@ -427,7 +468,20 @@ export default function Dashboard() {
   }
 
   function openAddModal() {
-    setForm((f) => ({ ...f, categoryId: categories.find((c) => c.id === f.categoryId) ? f.categoryId : categories[0]?.id || "" }));
+    let storedCategoryId = "";
+    try {
+      if (userId) storedCategoryId = window.localStorage.getItem(`panel-gastos:last-category:${userId}`) || "";
+    } catch {
+      storedCategoryId = "";
+    }
+    const preferredCategoryId = [
+      storedCategoryId,
+      lastCategoryId,
+      frequentCategories[0]?.id,
+      form.categoryId,
+      categories[0]?.id,
+    ].find((id) => id && categories.some((category) => category.id === id)) || "";
+    setForm((current) => ({ ...current, categoryId: preferredCategoryId }));
     setModalOpen(true);
   }
 
@@ -449,8 +503,14 @@ export default function Dashboard() {
     setSaving(false);
     if (!error && data) {
       setTransactions((prev) => [data, ...prev]);
+      setLastCategoryId(form.categoryId);
+      try {
+        if (userId) window.localStorage.setItem(`panel-gastos:last-category:${userId}`, form.categoryId);
+      } catch {
+        // La categoría elegida sigue activa aunque el navegador bloquee localStorage.
+      }
       setModalOpen(false);
-      setForm({ categoryId: categories[0]?.id || "", amount: "", description: "", date: todayIso() });
+      setForm({ categoryId: form.categoryId, amount: "", description: "", date: todayIso() });
     }
   }
 
@@ -910,19 +970,6 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="et-month-summary">
-              <div><span>GASTOS</span><strong>{budgetTx.length}</strong></div>
-              <div><span>MAYOR CATEGORÍA</span><strong>{largestCategory?.spent > 0 ? largestCategory.name : "—"}</strong></div>
-              <div>
-                <span>VS. ANTERIOR</span>
-                <strong style={{ color: comparisonAmount > 0 ? "var(--over)" : comparisonAmount < 0 ? "var(--accent)" : "var(--muted)" }}>
-                  {previousMonthSpent === 0 && totalGastado === 0
-                    ? "—"
-                    : `${comparisonAmount > 0 ? "↑ " : comparisonAmount < 0 ? "↓ " : ""}${fmt(Math.abs(comparisonAmount))}${comparisonPct === null ? "" : ` · ${Math.abs(comparisonPct)}%`}`}
-                </strong>
-              </div>
-            </div>
-
             <div className="et-section-title">En qué se fue la plata</div>
             {chartData.length > 0 ? (
               <>
@@ -1134,6 +1181,23 @@ export default function Dashboard() {
 
             <div className="et-field">
               <label className="et-label">CATEGORÍA</label>
+              {quickAddCategories.length > 0 && (
+                <div className="et-quick-categories" aria-label="Categorías usadas recientemente">
+                  {quickAddCategories.map((category) => (
+                    <button
+                      type="button"
+                      key={category.id}
+                      className={`et-category-chip${form.categoryId === category.id ? " active" : ""}`}
+                      aria-pressed={form.categoryId === category.id}
+                      onClick={() => setForm((current) => ({ ...current, categoryId: category.id }))}
+                    >
+                      <span className="et-dot" style={{ background: category.color }} />
+                      {category.name}
+                      {category.id === lastCategoryId && <small>Última</small>}
+                    </button>
+                  ))}
+                </div>
+              )}
               <select className="et-select" value={form.categoryId} onChange={(e) => setForm({ ...form, categoryId: e.target.value })}>
                 {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
@@ -1288,6 +1352,32 @@ export default function Dashboard() {
 
             <div className="et-subhead">Débito automático</div>
             <button className="et-menu-btn" onClick={openDebitModal}>Administrar débitos</button>
+
+            <div className="et-subhead">Mercado Pago</div>
+            <div className="et-sync-card" role="status" aria-live="polite">
+              {mpSyncStatusLoading ? (
+                <span className="et-sync-muted">Consultando estado…</span>
+              ) : !mpSyncStatus?.last_checked_at ? (
+                <span className="et-sync-muted">Todavía no hay consultas automáticas registradas.</span>
+              ) : (
+                <>
+                  <div className="et-sync-status-line">
+                    <span className={`et-sync-dot ${mpSyncStatus.last_status === "success" ? "success" : "error"}`} />
+                    <strong>{mpSyncStatus.last_status === "success" ? "Última consulta correcta" : "Falló la última consulta"}</strong>
+                  </div>
+                  <div className="et-sync-meta">{fmtDateTime(mpSyncStatus.last_checked_at)}</div>
+                  {mpSyncStatus.last_status === "success" && (
+                    <div className="et-sync-counts">
+                      {mpSyncStatus.imported_count > 0
+                        ? `${mpSyncStatus.imported_count} agregados`
+                        : "Sin movimientos nuevos"}
+                      {mpSyncStatus.skipped_count > 0 ? ` · ${mpSyncStatus.skipped_count} duplicados omitidos` : ""}
+                    </div>
+                  )}
+                  {mpSyncStatus.last_message && <p className="et-sync-message">{mpSyncStatus.last_message}</p>}
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
