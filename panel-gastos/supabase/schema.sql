@@ -19,6 +19,18 @@ create table if not exists gastos.categories (
   unique (user_id, name)
 );
 
+-- Débitos mensuales sin fecha de finalización, pausables por el usuario.
+create table if not exists gastos.recurring_expenses (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
+  category_id uuid references gastos.categories (id) on delete set null,
+  description text not null,
+  amount numeric not null check (amount > 0),
+  start_month date not null,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 -- Gastos individuales
 create table if not exists gastos.transactions (
   id uuid primary key default gen_random_uuid(),
@@ -36,8 +48,8 @@ create table if not exists gastos.transactions (
   installment_plan_id uuid,
   installment_number integer,
   installment_total integer,
-  -- 'manual' = lo cargaste vos con el botón +
-  -- 'mercadopago' = lo insertó la sincronización automática (fase 2)
+  recurring_expense_id uuid references gastos.recurring_expenses (id) on delete set null,
+  -- Origen: carga manual, Mercado Pago, cuotas de tarjeta o débito automático.
   source text not null default 'manual',
   created_at timestamptz not null default now()
 );
@@ -50,6 +62,7 @@ alter table gastos.transactions add column if not exists needs_review boolean no
 alter table gastos.transactions add column if not exists installment_plan_id uuid;
 alter table gastos.transactions add column if not exists installment_number integer;
 alter table gastos.transactions add column if not exists installment_total integer;
+alter table gastos.transactions add column if not exists recurring_expense_id uuid references gastos.recurring_expenses (id) on delete set null;
 create unique index if not exists transactions_user_external_id_uidx
   on gastos.transactions (user_id, external_id);
 
@@ -84,6 +97,7 @@ alter table gastos.transactions enable row level security;
 alter table gastos.category_rules enable row level security;
 alter table gastos.sync_state enable row level security;
 alter table gastos.settings enable row level security;
+alter table gastos.recurring_expenses enable row level security;
 
 create policy "select propias categorias" on gastos.categories
   for select using (auth.uid() = user_id);
@@ -115,6 +129,13 @@ create policy "select propia configuracion" on gastos.settings
 create policy "insert propia configuracion" on gastos.settings
   for insert with check (auth.uid() = user_id);
 create policy "update propia configuracion" on gastos.settings
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create policy "select propios debitos automaticos" on gastos.recurring_expenses
+  for select using (auth.uid() = user_id);
+create policy "insert propios debitos automaticos" on gastos.recurring_expenses
+  for insert with check (auth.uid() = user_id);
+create policy "update propios debitos automaticos" on gastos.recurring_expenses
   for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- sync_state no tiene políticas: solo la Edge Function (service role,
