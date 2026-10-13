@@ -115,7 +115,8 @@ html, body { margin: 0; padding: 0; background: #FAFAF8; }
 .et-tx-actions .et-delete-btn:disabled { opacity: 0.45; cursor: default; }
 .et-tx-row:last-child { border-bottom: none; }
 .et-tx-main { flex: 1; min-width: 0; }
-.et-tx-main .et-tx-desc, .et-tx-main .et-tx-meta { display: block; }
+.et-tx-main .et-tx-desc { display: block; }
+.et-tx-main .et-tx-meta { display: flex; flex-wrap: wrap; }
 .et-tx-desc { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .et-tx-meta { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .et-tx-badge-mp { color: var(--accent); font-weight: 600; }
