@@ -185,6 +185,7 @@ export default function Dashboard() {
   const [lastCategoryId, setLastCategoryId] = useState("");
   const [mpSyncStatus, setMpSyncStatus] = useState(null);
   const [mpSyncStatusLoading, setMpSyncStatusLoading] = useState(true);
+  const [mpSyncStatusError, setMpSyncStatusError] = useState(false);
   const [categories, setCategories] = useState([]);
   const [rules, setRules] = useState([]);
   const [transactions, setTransactions] = useState([]);
@@ -375,10 +376,16 @@ export default function Dashboard() {
           .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
           .maybeSingle();
         if (error) throw error;
-        if (!cancelled) setMpSyncStatus(data);
+        if (!cancelled) {
+          setMpSyncStatus(data);
+          setMpSyncStatusError(false);
+        }
       } catch (error) {
         console.warn("No se pudo cargar el estado de Mercado Pago:", error);
-        if (!cancelled) setMpSyncStatus(null);
+        if (!cancelled) {
+          setMpSyncStatus(null);
+          setMpSyncStatusError(true);
+        }
       } finally {
         if (!cancelled) setMpSyncStatusLoading(false);
       }
@@ -1372,6 +1379,8 @@ export default function Dashboard() {
             <div className="et-sync-card" role="status" aria-live="polite">
               {mpSyncStatusLoading ? (
                 <span className="et-sync-muted">Consultando estado…</span>
+              ) : mpSyncStatusError ? (
+                <span className="et-sync-muted">No se pudo consultar el estado.</span>
               ) : !mpSyncStatus?.last_checked_at ? (
                 <span className="et-sync-muted">Todavía no hay consultas automáticas registradas.</span>
               ) : (
