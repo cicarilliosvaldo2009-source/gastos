@@ -114,11 +114,33 @@ async function generateAutomaticDebits(supabase: ReturnType<typeof createClient>
   return data?.length || 0;
 }
 
+async function saveSyncStatus(
+  supabase: ReturnType<typeof createClient>,
+  status: "success" | "error",
+  importedCount: number,
+  skippedCount: number,
+  message: string,
+) {
+  const { error } = await supabase.from("mercadopago_sync_status").upsert({
+    user_id: SYNC_USER_ID,
+    last_checked_at: new Date().toISOString(),
+    last_status: status,
+    imported_count: importedCount,
+    skipped_count: skippedCount,
+    last_message: message,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "user_id" });
+  if (error) throw error;
+}
+
+let statusClient: ReturnType<typeof createClient> | null = null;
+
 Deno.serve(async () => {
   try {
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
       db: { schema: "gastos" },
     });
+    statusClient = supabase;
 
     const automaticDebitCount = await generateAutomaticDebits(supabase);
 
@@ -126,7 +148,7 @@ Deno.serve(async () => {
       headers: { Authorization: `Bearer ${MP_TOKEN}` },
     });
     if (!listRes.ok) {
-      return new Response(`Error al listar reportes de Mercado Pago: ${listRes.status}`, { status: 500 });
+      throw new Error(`Error al listar reportes de Mercado Pago: ${listRes.status}`);
     }
 
     const reports = await listRes.json();
@@ -134,6 +156,7 @@ Deno.serve(async () => {
       ? reports.filter((report) => report.status === "processed" && report.file_name)
       : [];
     if (readyReports.length === 0) {
+      await saveSyncStatus(supabase, "success", 0, 0, "Todavía no hay reportes procesados de Mercado Pago.");
       return new Response(`Débitos automáticos agregados: ${automaticDebitCount}. Todavía no hay reportes procesados de Mercado Pago.`, { status: 200 });
     }
 
@@ -150,6 +173,7 @@ Deno.serve(async () => {
       .maybeSingle();
     if (stateError) throw stateError;
     if (state?.last_file_name === latest.file_name) {
+      await saveSyncStatus(supabase, "success", 0, 0, "El reporte más reciente ya estaba sincronizado; no hay movimientos nuevos.");
       return new Response(`Débitos automáticos agregados: ${automaticDebitCount}. Nada nuevo de Mercado Pago para sincronizar.`, { status: 200 });
     }
 
@@ -158,7 +182,7 @@ Deno.serve(async () => {
       { headers: { Authorization: `Bearer ${MP_TOKEN}` } },
     );
     if (!fileRes.ok) {
-      return new Response(`Error al descargar el reporte: ${fileRes.status}`, { status: 500 });
+      throw new Error(`Error al descargar el reporte: ${fileRes.status}`);
     }
 
     const { headers, rows } = parseCsv(await fileRes.text());
@@ -240,11 +264,14 @@ Deno.serve(async () => {
       }];
     });
 
+    let importedCount = 0;
     if (inserts.length > 0) {
-      const { error } = await supabase
+      const { data: importedRows, error } = await supabase
         .from("transactions")
-        .upsert(inserts, { onConflict: "user_id,external_id", ignoreDuplicates: true });
+        .upsert(inserts, { onConflict: "user_id,external_id", ignoreDuplicates: true })
+        .select("id");
       if (error) throw error;
+      importedCount = importedRows?.length || 0;
     }
 
     const { error: syncError } = await supabase.from("sync_state").upsert({
@@ -254,9 +281,22 @@ Deno.serve(async () => {
     });
     if (syncError) throw syncError;
 
-    return new Response(`Listo: ${inserts.length} gastos de Mercado Pago y ${automaticDebitCount} débitos automáticos agregados.`, { status: 200 });
+    const skippedCount = Math.max(inserts.length - importedCount, 0);
+    const message = importedCount > 0
+      ? "Se procesó el último reporte disponible."
+      : "Se revisó el reporte, pero no había movimientos nuevos.";
+    await saveSyncStatus(supabase, "success", importedCount, skippedCount, message);
+
+    return new Response(`Listo: ${importedCount} gastos de Mercado Pago y ${automaticDebitCount} débitos automáticos agregados; ${skippedCount} duplicados omitidos.`, { status: 200 });
   } catch (err) {
     console.error("sync-mercadopago:", err);
+    if (statusClient) {
+      try {
+        await saveSyncStatus(statusClient, "error", 0, 0, "No se pudo completar la consulta a Mercado Pago.");
+      } catch (statusError) {
+        console.error("sync-mercadopago status:", statusError);
+      }
+    }
     return new Response("Error al sincronizar el reporte de Mercado Pago.", { status: 500 });
   }
 });
