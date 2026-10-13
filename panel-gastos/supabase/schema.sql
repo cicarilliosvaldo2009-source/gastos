@@ -58,10 +58,20 @@ create table if not exists gastos.sync_state (
   synced_at timestamptz
 );
 
+-- Límite mensual global de gastos, configurable por cada usuario.
+create table if not exists gastos.settings (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
+  monthly_limit numeric not null check (monthly_limit > 0),
+  created_at timestamptz not null default now(),
+  unique (user_id)
+);
+
 alter table gastos.categories enable row level security;
 alter table gastos.transactions enable row level security;
 alter table gastos.category_rules enable row level security;
 alter table gastos.sync_state enable row level security;
+alter table gastos.settings enable row level security;
 
 create policy "select propias categorias" on gastos.categories
   for select using (auth.uid() = user_id);
@@ -87,6 +97,13 @@ create policy "insert propias reglas" on gastos.category_rules
   for insert with check (auth.uid() = user_id);
 create policy "delete propias reglas" on gastos.category_rules
   for delete using (auth.uid() = user_id);
+
+create policy "select propia configuracion" on gastos.settings
+  for select using (auth.uid() = user_id);
+create policy "insert propia configuracion" on gastos.settings
+  for insert with check (auth.uid() = user_id);
+create policy "update propia configuracion" on gastos.settings
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- sync_state no tiene políticas: solo la Edge Function (service role,
 -- que ignora RLS) la lee y escribe.
