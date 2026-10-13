@@ -31,6 +31,17 @@ const fmtMonth = (date) => {
 };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
+const nextMonthIso = () => {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+const dateForMonth = (monthIso, offset) => {
+  const [year, month] = monthIso.split("-").map(Number);
+  const d = new Date(year, month - 1 + offset, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+};
 
 function statusFor(pct) {
   if (pct >= 100) return "over";
@@ -165,6 +176,7 @@ export default function Dashboard() {
   const [rules, setRules] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [monthOffset, setMonthOffset] = useState(0);
+  const [transactionView, setTransactionView] = useState("month");
 
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -183,6 +195,8 @@ export default function Dashboard() {
   const [txEditing, setTxEditing] = useState(null);
   const [txEditCategoryId, setTxEditCategoryId] = useState("");
   const [txEditExcluded, setTxEditExcluded] = useState(false);
+  const [rememberCategoryRule, setRememberCategoryRule] = useState(false);
+  const [ruleKeywordDraft, setRuleKeywordDraft] = useState("");
   const [txEditError, setTxEditError] = useState("");
   const [savingTxEdit, setSavingTxEdit] = useState(false);
 
@@ -191,6 +205,17 @@ export default function Dashboard() {
   const [limitDraft, setLimitDraft] = useState("");
   const [savingLimit, setSavingLimit] = useState(false);
   const [limitError, setLimitError] = useState("");
+
+  const [cardPlanModalOpen, setCardPlanModalOpen] = useState(false);
+  const [cardPlanSaving, setCardPlanSaving] = useState(false);
+  const [cardPlanError, setCardPlanError] = useState("");
+  const [cardPlanForm, setCardPlanForm] = useState({
+    description: "",
+    amount: "",
+    categoryId: "",
+    remaining: "",
+    firstMonth: nextMonthIso(),
+  });
 
   const fileInputRef = useRef(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -270,6 +295,10 @@ export default function Dashboard() {
   }, [categorySpend]);
 
   const chartData = categorySpend.filter((c) => c.spent > 0).map((c) => ({ name: c.name, value: c.spent, color: c.color }));
+  const pendingReviewTx = useMemo(
+    () => transactions.filter((t) => t.needs_review).sort((a, b) => (a.date < b.date ? 1 : -1)),
+    [transactions]
+  );
 
   function handleDescriptionChange(desc) {
     const match = matchCategory(desc, rules);
@@ -383,6 +412,8 @@ export default function Dashboard() {
     setTxEditing(t);
     setTxEditCategoryId(t.category_id || "");
     setTxEditExcluded(Boolean(t.excluded_from_budget));
+    setRememberCategoryRule(false);
+    setRuleKeywordDraft(t.description || "");
     setTxEditError("");
   }
 
@@ -392,7 +423,7 @@ export default function Dashboard() {
     try {
       const { data, error } = await supabase
         .from("transactions")
-        .update({ category_id: txEditCategoryId || null, excluded_from_budget: txEditExcluded })
+        .update({ category_id: txEditCategoryId || null, excluded_from_budget: txEditExcluded, needs_review: false })
         .eq("id", txEditing.id)
         .select()
         .single()
@@ -400,6 +431,23 @@ export default function Dashboard() {
       if (error) throw error;
       if (!data) throw new Error("Supabase no confirmó el cambio.");
       setTransactions((prev) => prev.map((t) => (t.id === data.id ? data : t)));
+
+      if (rememberCategoryRule && txEditCategoryId && ruleKeywordDraft.trim()) {
+        const keyword = ruleKeywordDraft.trim();
+        const { data: oldRule, error: lookupError } = await supabase
+          .from("category_rules")
+          .select("id")
+          .eq("keyword", keyword)
+          .maybeSingle();
+        if (lookupError) throw lookupError;
+        const ruleResult = oldRule
+          ? await supabase.from("category_rules").update({ category_id: txEditCategoryId }).eq("id", oldRule.id).select().single()
+          : await supabase.from("category_rules").insert({ keyword, category_id: txEditCategoryId }).select().single();
+        if (ruleResult.error) throw ruleResult.error;
+        setRules((prev) => oldRule
+          ? prev.map((rule) => rule.id === oldRule.id ? ruleResult.data : rule)
+          : [...prev, ruleResult.data]);
+      }
       setTxEditing(null);
     } catch (error) {
       setTxEditError(error.name === "TimeoutError"
@@ -407,6 +455,60 @@ export default function Dashboard() {
         : `No se pudo guardar: ${error.message || "error de conexión"}`);
     } finally {
       setSavingTxEdit(false);
+    }
+  }
+
+  function openCardPlan() {
+    setCardPlanForm({
+      description: "",
+      amount: "",
+      categoryId: categories[0]?.id || "",
+      remaining: "",
+      firstMonth: nextMonthIso(),
+    });
+    setCardPlanError("");
+    setCardPlanModalOpen(true);
+  }
+
+  async function addCardPlan() {
+    const amount = Number(String(cardPlanForm.amount).replace(",", "."));
+    const remaining = Number.parseInt(cardPlanForm.remaining, 10);
+    if (!cardPlanForm.description.trim() || !Number.isFinite(amount) || amount <= 0 ||
+      !Number.isInteger(remaining) || remaining < 1 || remaining > 120 || !cardPlanForm.categoryId || !cardPlanForm.firstMonth) {
+      setCardPlanError("Completá la descripción, el importe de cada cuota, las cuotas pendientes, la categoría y el primer mes.");
+      return;
+    }
+
+    setCardPlanSaving(true);
+    setCardPlanError("");
+    const planId = crypto.randomUUID();
+    const installments = Array.from({ length: remaining }, (_, index) => ({
+      category_id: cardPlanForm.categoryId,
+      description: cardPlanForm.description.trim(),
+      amount,
+      date: dateForMonth(cardPlanForm.firstMonth, index),
+      source: "credit_card",
+      external_id: `card-installment:${planId}:${index + 1}`,
+      installment_plan_id: planId,
+      installment_number: index + 1,
+      installment_total: remaining,
+      excluded_from_budget: false,
+      needs_review: false,
+    }));
+
+    try {
+      const { data, error } = await supabase.from("transactions").insert(installments).select()
+        .abortSignal(AbortSignal.timeout(15000));
+      if (error) throw error;
+      setTransactions((prev) => [...(data || []), ...prev].sort((a, b) => (a.date < b.date ? 1 : -1)));
+      setCardPlanModalOpen(false);
+      setConfigModalOpen(false);
+    } catch (error) {
+      setCardPlanError(error.name === "TimeoutError"
+        ? "La base de datos tardó demasiado en responder. Intentá otra vez."
+        : `No se pudieron guardar las cuotas: ${error.message || "error de conexión"}`);
+    } finally {
+      setCardPlanSaving(false);
     }
   }
 
@@ -490,6 +592,7 @@ export default function Dashboard() {
       date: r.date,
       source: "mercadopago",
       external_id: r.externalId,
+      needs_review: !r.categoryId,
     }));
     const { data, error } = await supabase
       .from("transactions")
@@ -517,6 +620,7 @@ export default function Dashboard() {
   }
 
   const sortedTx = [...monthTx].sort((a, b) => (a.date < b.date ? 1 : -1));
+  const displayedTx = transactionView === "review" ? pendingReviewTx : sortedTx;
 
   return (
     <div className="et-app">
@@ -632,14 +736,22 @@ export default function Dashboard() {
                 Importar
               </button>
             </div>
+            <div style={{ display: "flex", gap: 8, margin: "-4px 0 14px" }}>
+              <button className="et-edit-all" onClick={() => setTransactionView("month")} aria-pressed={transactionView === "month"}>Este mes</button>
+              <button className="et-edit-all" onClick={() => setTransactionView("review")} aria-pressed={transactionView === "review"}>
+                Por revisar{pendingReviewTx.length ? ` (${pendingReviewTx.length})` : ""}
+              </button>
+            </div>
             {importNotice && (
               <p style={{ fontSize: 12.5, color: "var(--accent)", margin: "-6px 0 10px" }}>{importNotice}</p>
             )}
-            {sortedTx.length === 0 ? (
-              <div className="et-empty">Todavía no hay gastos cargados en este mes.<br />Tocá "Agregar gasto" para sumar el primero.</div>
+            {displayedTx.length === 0 ? (
+              <div className="et-empty">{transactionView === "review"
+                ? "No hay movimientos pendientes de revisión."
+                : <>Todavía no hay gastos cargados en este mes.<br />Tocá "Agregar gasto" para sumar el primero.</>}</div>
             ) : (
               <div>
-                {sortedTx.map((t) => {
+                {displayedTx.map((t) => {
                   const cat = categories.find((c) => c.id === t.category_id);
                   const color = cat ? cat.color : "#9B9B94";
                   return (
@@ -650,6 +762,9 @@ export default function Dashboard() {
                         <div className="et-tx-meta">
                           <span>{fmtDate(t.date)}{cat ? " · " + cat.name : " · Sin categoría"}</span>
                           {t.source === "mercadopago" && <span className="et-tx-badge-mp">MP</span>}
+                          {t.source === "credit_card" && <span className="et-tx-badge-mp">Tarjeta</span>}
+                          {t.installment_number && <span className="et-tx-badge-mp">Cuota {t.installment_number}/{t.installment_total}</span>}
+                          {t.needs_review && <span className="et-tx-badge-mp">Por revisar</span>}
                           {t.excluded_from_budget && <span className="et-tx-badge-mp">Fuera del presupuesto</span>}
                         </div>
                       </div>
@@ -841,11 +956,64 @@ export default function Dashboard() {
               <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openRulesModal(); }}>Reglas</button>
             </div>
 
+            <div className="et-subhead">Tarjeta de crédito</div>
+            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
+              Cargá el importe por cuota y las cuotas pendientes. La app agrega un movimiento en cada mes indicado.
+            </p>
+            <button className="et-save-btn" onClick={openCardPlan}>Agregar cuotas</button>
+
             <div className="et-subhead">Mercado Pago</div>
             <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
               Para cargar gastos de Mercado Pago, descargá el CSV de "Todas las transacciones" y usá "Importar",
               junto a "Movimientos". También podés importar el antiguo "Resumen de cuenta"; los movimientos ya cargados se saltean.
             </p>
+          </div>
+        </div>
+      )}
+
+      {cardPlanModalOpen && (
+        <div className="et-modal-overlay" onClick={() => !cardPlanSaving && setCardPlanModalOpen(false)}>
+          <div className="et-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="et-modal-head">
+              <span className="et-modal-title">Compra con tarjeta</span>
+              <button className="et-modal-close" aria-label="Cerrar" onClick={() => setCardPlanModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
+              Se creará un movimiento mensual por cada cuota pendiente, empezando en el mes elegido.
+            </p>
+            <div className="et-field">
+              <label className="et-label">DESCRIPCIÓN</label>
+              <input className="et-input" type="text" placeholder="Ej: Heladera" value={cardPlanForm.description}
+                onChange={(e) => setCardPlanForm({ ...cardPlanForm, description: e.target.value })} />
+            </div>
+            <div className="et-field">
+              <label className="et-label">IMPORTE DE CADA CUOTA</label>
+              <input className="et-input et-num" type="number" min="0.01" step="0.01" placeholder="0"
+                value={cardPlanForm.amount} onChange={(e) => setCardPlanForm({ ...cardPlanForm, amount: e.target.value })} />
+            </div>
+            <div className="et-field">
+              <label className="et-label">CUOTAS PENDIENTES</label>
+              <input className="et-input" type="number" min="1" max="120" step="1" placeholder="Ej: 4"
+                value={cardPlanForm.remaining} onChange={(e) => setCardPlanForm({ ...cardPlanForm, remaining: e.target.value })} />
+            </div>
+            <div className="et-field">
+              <label className="et-label">PRIMER MES A CONTABILIZAR</label>
+              <input className="et-input" type="month" value={cardPlanForm.firstMonth}
+                onChange={(e) => setCardPlanForm({ ...cardPlanForm, firstMonth: e.target.value })} />
+            </div>
+            <div className="et-field">
+              <label className="et-label">CATEGORÍA</label>
+              <select className="et-select" value={cardPlanForm.categoryId}
+                onChange={(e) => setCardPlanForm({ ...cardPlanForm, categoryId: e.target.value })}>
+                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            {cardPlanError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{cardPlanError}</p>}
+            <button className="et-save-btn" onClick={addCardPlan} disabled={cardPlanSaving}>
+              {cardPlanSaving ? "Guardando…" : "Agregar cuotas"}
+            </button>
           </div>
         </div>
       )}
@@ -946,6 +1114,19 @@ export default function Dashboard() {
                 {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 13, color: "var(--muted)", lineHeight: 1.45, margin: "8px 0 14px" }}>
+              <input type="checkbox" className="et-import-check" checked={rememberCategoryRule}
+                disabled={!txEditCategoryId}
+                onChange={(e) => setRememberCategoryRule(e.target.checked)} />
+              <span>¿Recordar esta categoría para futuros movimientos parecidos?</span>
+            </label>
+            {rememberCategoryRule && (
+              <div className="et-field">
+                <label className="et-label">SI LA DESCRIPCIÓN CONTIENE</label>
+                <input className="et-input" type="text" value={ruleKeywordDraft}
+                  onChange={(e) => setRuleKeywordDraft(e.target.value)} />
+              </div>
+            )}
             <label style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 13, color: "var(--muted)", lineHeight: 1.45, margin: "8px 0 16px" }}>
               <input
                 type="checkbox"
