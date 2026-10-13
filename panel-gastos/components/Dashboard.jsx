@@ -187,6 +187,7 @@ export default function Dashboard() {
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [limitDraft, setLimitDraft] = useState("");
   const [savingLimit, setSavingLimit] = useState(false);
+  const [limitError, setLimitError] = useState("");
 
   const fileInputRef = useRef(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -394,23 +395,35 @@ export default function Dashboard() {
 
   function openConfig() {
     setLimitDraft(String(presupuestoTotal));
+    setLimitError("");
     setConfigModalOpen(true);
   }
 
   async function saveLimit() {
     const val = parseFloat(limitDraft);
-    if (!val || val <= 0) return;
+    if (!Number.isFinite(val) || val <= 0) {
+      setLimitError("Ingresá un límite mensual mayor que cero.");
+      return;
+    }
     setSavingLimit(true);
-    const { data, error } = await supabase
-      .from("settings")
-      .update({ monthly_limit: val })
-      .eq("id", settings.id)
-      .select()
-      .single();
-    setSavingLimit(false);
-    if (!error && data) {
+    setLimitError("");
+    try {
+      const { data, error } = await supabase
+        .from("settings")
+        .upsert({ monthly_limit: val }, { onConflict: "user_id" })
+        .select()
+        .single()
+        .abortSignal(AbortSignal.timeout(15000));
+      if (error) throw error;
+      if (!data) throw new Error("Supabase no confirmó el cambio.");
       setSettings(data);
       setConfigModalOpen(false);
+    } catch (error) {
+      setLimitError(error.name === "TimeoutError"
+        ? "La base de datos tardó demasiado en responder. Revisá tu conexión e intentá otra vez."
+        : `No se pudo guardar el límite: ${error.message || "error de conexión"}`);
+    } finally {
+      setSavingLimit(false);
     }
   }
 
@@ -506,8 +519,8 @@ export default function Dashboard() {
             </div>
 
             <div className="et-hero">
-              <div className="et-hero-label">Gastado este mes</div>
-              <div className="et-hero-amount et-num">{fmt(totalGastado)}</div>
+              <div className="et-hero-label">Te queda para gastar</div>
+              <div className="et-hero-amount et-num">{fmt(disponible)}</div>
               <div className="et-hero-sub">de {fmt(presupuestoTotal)} presupuestados</div>
             </div>
 
@@ -517,9 +530,9 @@ export default function Dashboard() {
                 <div className="et-stat-amount et-num">{fmt(presupuestoTotal)}</div>
               </div>
               <div className="et-stat">
-                <div className="et-stat-top">DISPONIBLE</div>
-                <div className="et-stat-amount et-num" style={{ color: disponible >= 0 ? "var(--accent)" : "var(--over)" }}>
-                  {fmt(disponible)}
+                <div className="et-stat-top">GASTADO ESTE MES</div>
+                <div className="et-stat-amount et-num">
+                  {fmt(totalGastado)}
                 </div>
               </div>
             </div>
@@ -802,6 +815,7 @@ export default function Dashboard() {
             <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
               {savingLimit ? "Guardando…" : "Guardar"}
             </button>
+            {limitError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{limitError}</p>}
 
             <div className="et-subhead">Administrar</div>
             <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
