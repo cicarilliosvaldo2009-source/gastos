@@ -451,13 +451,29 @@ export default function Dashboard() {
   const currentMonthProjection = useMemo(() => {
     const now = new Date();
     const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const spent = transactions
-      .filter((transaction) => transaction.date.startsWith(monthKey) && !transaction.excluded_from_budget)
+    const currentMonthTransactions = transactions.filter((transaction) =>
+      transaction.date.startsWith(monthKey) && !transaction.excluded_from_budget
+    );
+    const plannedTransactions = currentMonthTransactions.filter((transaction) =>
+      transaction.source === "credit_card" || transaction.source === "automatic_debit"
+    );
+    const plannedTransactionTotal = plannedTransactions
       .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
+    const observedSpent = currentMonthTransactions
+      .filter((transaction) => transaction.source !== "credit_card" && transaction.source !== "automatic_debit")
+      .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
+    const generatedDebitIds = new Set(
+      currentMonthTransactions
+        .filter((transaction) => transaction.source === "automatic_debit" && transaction.recurring_expense_id)
+        .map((transaction) => transaction.recurring_expense_id)
+    );
+    const notYetGeneratedDebits = recurringExpenses
+      .filter((debit) => debit.active && debit.start_month.slice(0, 7) <= monthKey && !generatedDebitIds.has(debit.id))
+      .reduce((sum, debit) => sum + Number(debit.amount), 0);
+    const fixedCommitments = plannedTransactionTotal + notYetGeneratedDebits;
     const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
     const daysElapsed = now.getDate();
-    const projectedSpent = daysElapsed > 0 ? Math.round((spent / daysElapsed) * daysInMonth) : 0;
-    const monthStart = `${monthKey}-01`;
+    const projectedSpent = fixedCommitments + (daysElapsed > 0 ? Math.round((observedSpent / daysElapsed) * daysInMonth) : 0);
     const budget = monthlyBudgets
       .filter((item) => item.month_start.slice(0, 7) <= monthKey)
       .sort((a, b) => b.month_start.localeCompare(a.month_start))[0];
@@ -466,15 +482,15 @@ export default function Dashboard() {
       : settings?.monthly_limit > 0 ? Number(settings.monthly_limit) : null;
 
     return {
-      monthKey,
-      spent,
+      observedSpent,
+      fixedCommitments,
       daysElapsed,
       daysInMonth,
       projectedSpent,
       limit,
       projectedRemainder: limit === null ? null : limit - projectedSpent,
     };
-  }, [transactions, monthlyBudgets, settings]);
+  }, [transactions, recurringExpenses, monthlyBudgets, settings]);
 
   const categorySpend = useMemo(() => {
     return categories.map((c) => {
@@ -1386,12 +1402,12 @@ export default function Dashboard() {
 
             <div className="et-subhead">Proyección del mes</div>
             <div className="et-projection-card">
-              <span className="et-projection-label">A este ritmo, terminarías gastando</span>
-              {currentMonthProjection.spent > 0 ? (
+              {currentMonthProjection.observedSpent > 0 ? (
                 <>
+                  <span className="et-projection-label">A este ritmo, terminarías gastando</span>
                   <strong className="et-projection-amount et-num">~{fmt(currentMonthProjection.projectedSpent)}</strong>
                   <span className="et-projection-note">
-                    Estimación basada en {currentMonthProjection.daysElapsed} de {currentMonthProjection.daysInMonth} días.
+                    Basado en {currentMonthProjection.daysElapsed} de {currentMonthProjection.daysInMonth} días e incluye cuotas y débitos previstos.
                   </span>
                   {currentMonthProjection.limit !== null && (
                     <>
@@ -1411,6 +1427,12 @@ export default function Dashboard() {
                       </span>
                     </>
                   )}
+                </>
+              ) : currentMonthProjection.fixedCommitments > 0 ? (
+                <>
+                  <span className="et-projection-label">Cuotas y débitos previstos</span>
+                  <strong className="et-projection-amount et-num">{fmt(currentMonthProjection.fixedCommitments)}</strong>
+                  <span className="et-projection-note">Aún no hay suficientes gastos del día a día para estimar el cierre.</span>
                 </>
               ) : (
                 <span className="et-projection-note">Todavía no hay gastos cargados este mes para estimar.</span>
