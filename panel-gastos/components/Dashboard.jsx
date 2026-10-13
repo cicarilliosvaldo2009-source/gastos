@@ -184,7 +184,6 @@ export default function Dashboard() {
   const [transactionDateTo, setTransactionDateTo] = useState("");
   const [transactionAmountMin, setTransactionAmountMin] = useState("");
   const [transactionAmountMax, setTransactionAmountMax] = useState("");
-  const [chartExpanded, setChartExpanded] = useState(false);
   const [categoriesExpanded, setCategoriesExpanded] = useState(false);
   const [transactionsExpanded, setTransactionsExpanded] = useState(false);
   const [savingsExpanded, setSavingsExpanded] = useState(false);
@@ -408,13 +407,12 @@ export default function Dashboard() {
     ? Math.round(((totalGastado - previousMonthSpent) / previousMonthSpent) * 100)
     : null;
 
-  const alerts = useMemo(() => {
-    const over = categorySpend.filter((c) => c.status === "over");
-    const warn = categorySpend.filter((c) => c.status === "warn");
-    return { over, warn };
-  }, [categorySpend]);
-
-  const chartData = categorySpend.filter((c) => c.spent > 0).map((c) => ({ name: c.name, value: c.spent, color: c.color }));
+  const chartData = categorySpend.filter((c) => c.spent > 0).map((c) => ({
+    name: c.name,
+    value: c.spent,
+    color: c.color,
+    overBudget: c.status === "over",
+  }));
   const pendingReviewTx = useMemo(
     () => transactions.filter((t) => t.needs_review).sort((a, b) => (a.date < b.date ? 1 : -1)),
     [transactions]
@@ -906,57 +904,35 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {(alerts.over.length > 0 || alerts.warn.length > 0) && (
-              <div className="et-alerts">
-                {alerts.over.map((c) => (
-                  <div className="et-alert over" key={c.id}>
-                    <span className="et-alert-dot" />
-                    <span>Superaste el presupuesto de <strong>{c.name}</strong>: gastaste {fmt(c.spent)} de {fmt(c.budget)}.</span>
-                  </div>
-                ))}
-                {alerts.warn.map((c) => (
-                  <div className="et-alert warn" key={c.id}>
-                    <span className="et-alert-dot" />
-                    <span>Estás cerca del límite en <strong>{c.name}</strong>: usaste el {c.pct}% de {fmt(c.budget)}.</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {chartData.length > 0 && (
+            <div className="et-section-title">En qué se fue la plata</div>
+            {chartData.length > 0 ? (
               <>
-                <div className="et-section-row">
-                  <button type="button" className="et-edit-all" onClick={() => setChartExpanded((expanded) => !expanded)} aria-expanded={chartExpanded} style={{ display: "inline-flex", alignItems: "center", gap: 6, paddingLeft: 0 }}>
-                    <span className="et-section-title">En qué se fue la plata</span>
-                    <ChevronDown size={16} style={{ transform: chartExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
-                  </button>
-                </div>
-                {chartExpanded && (
-                  <>
-                    <ResponsiveContainer width="100%" height={170}>
-                      <PieChart>
-                        <Pie data={chartData} dataKey="value" nameKey="name" innerRadius={56} outerRadius={72} paddingAngle={3} stroke="none">
-                          {chartData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                        </Pie>
-                        <Tooltip
-                          formatter={(value) => fmt(value)}
-                          contentStyle={{ background: "#FFFFFF", border: "1px solid #E8E6E1", borderRadius: 10, fontSize: 12 }}
-                          labelStyle={{ color: "#1C1B18" }}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                    <div className="et-legend">
-                      {chartData.map((d) => (
-                        <div className="et-legend-row" key={d.name}>
-                          <span className="et-dot" style={{ background: d.color }} />
-                          <span className="et-legend-name">{d.name}</span>
-                          <span className="et-legend-val et-num">{Math.round((d.value / totalGastado) * 100)}% · {fmt(d.value)}</span>
-                        </div>
-                      ))}
+                <ResponsiveContainer width="100%" height={170}>
+                  <PieChart>
+                    <Pie data={chartData} dataKey="value" nameKey="name" innerRadius={56} outerRadius={72} paddingAngle={3} stroke="none">
+                      {chartData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <Tooltip
+                      formatter={(value) => fmt(value)}
+                      contentStyle={{ background: "#FFFFFF", border: "1px solid #E8E6E1", borderRadius: 10, fontSize: 12 }}
+                      labelStyle={{ color: "#1C1B18" }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="et-legend">
+                  {chartData.map((d) => (
+                    <div className="et-legend-row" key={d.name}>
+                      <span className="et-dot" style={{ background: d.color }} />
+                      <span className="et-legend-name" style={d.overBudget ? { color: "var(--over)", fontWeight: 700 } : undefined}>{d.name}</span>
+                      <span className="et-legend-val et-num" style={d.overBudget ? { color: "var(--over)", fontWeight: 700 } : undefined}>
+                        {Math.round((d.value / totalGastado) * 100)}% · {fmt(d.value)}
+                      </span>
                     </div>
-                  </>
-                )}
+                  ))}
+                </div>
               </>
+            ) : (
+              <div className="et-empty">Todavía no hay gastos en este mes.</div>
             )}
 
             <div className="et-section-row">
@@ -1013,10 +989,10 @@ export default function Dashboard() {
                     <div className="et-budget-top">
                       <span className="et-cat-label">
                         <span className="et-dot" style={{ background: c.color }} />
-                        <span className="et-cat-name">{c.name}</span>
+                        <span className="et-cat-name" style={c.status === "over" ? { color: "var(--over)" } : undefined}>{c.name}</span>
                       </span>
                       <span className="et-cat-nums">
-                        <span className="et-num">{fmt(c.spent)} / {fmt(c.budget)}</span>
+                        <span className="et-num" style={c.status === "over" ? { color: "var(--over)", fontWeight: 700 } : undefined}>{fmt(c.spent)} / {fmt(c.budget)}</span>
                       </span>
                     </div>
                     <div className="et-track">
