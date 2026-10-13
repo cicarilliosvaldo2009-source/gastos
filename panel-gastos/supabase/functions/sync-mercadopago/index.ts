@@ -193,6 +193,7 @@ Deno.serve(async () => {
         date,
         source: "mercadopago",
         external_id: externalId,
+        needs_review: !found,
       }];
     });
 
