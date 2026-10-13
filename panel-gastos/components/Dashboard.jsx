@@ -726,19 +726,18 @@ export default function Dashboard() {
             <div className="et-hero">
               <div className="et-hero-label">Te queda para gastar</div>
               <div className="et-hero-amount et-num">{fmt(disponible)}</div>
-              <div className="et-hero-sub">de {fmt(presupuestoTotal)} presupuestados</div>
             </div>
 
             <div className="et-stats">
-              <div className="et-stat">
-                <div className="et-stat-top">PRESUPUESTO TOTAL</div>
-                <div className="et-stat-amount et-num">{fmt(presupuestoTotal)}</div>
-              </div>
               <div className="et-stat">
                 <div className="et-stat-top">GASTADO ESTE MES</div>
                 <div className="et-stat-amount et-num">
                   {fmt(totalGastado)}
                 </div>
+              </div>
+              <div className="et-stat">
+                <div className="et-stat-top">PRESUPUESTO TOTAL</div>
+                <div className="et-stat-amount et-num">{fmt(presupuestoTotal)}</div>
               </div>
             </div>
 
