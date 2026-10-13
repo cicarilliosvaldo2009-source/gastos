@@ -83,9 +83,9 @@ desactivados, aunque la URL sea pública nadie más va a poder entrar.
 
 ## Sobre el botón "+"
 
-Hoy es la única forma de cargar un gasto: todavía no hay nada leyendo tu
-cuenta de Mercado Pago automáticamente. Vas a seguir usándolo después
-también, para lo que Mercado Pago no vea (efectivo, gastos compartidos, etc.)
+El botón "+" sirve para los gastos que cargás manualmente. Cuando completes
+la Fase 2, Mercado Pago se sincronizará a diario. Vas a seguir usando el botón
+para lo que Mercado Pago no vea (efectivo, gastos compartidos, etc.)
 — por eso cada gasto tiene una etiqueta `manual` o `MP` junto a la fecha,
 para que después puedas distinguir lo que cargaste vos de lo que entró solo.
 
@@ -98,7 +98,7 @@ para que después puedas distinguir lo que cargaste vos de lo que entró solo.
 2. "Tus integraciones" > "Crear aplicación". Elegí cualquier nombre
    (ej. "Panel de gastos"), y como tipo de integración "Pagos online".
 3. Entrá a la aplicación creada > "Credenciales de producción" y copiá el
-   **Access Token**. Guardalo, lo vas a necesitar en el paso 4.
+   **Access Token**. Guardalo, lo vas a necesitar en el paso 5.
 
 ### 2. Configurar el reporte "Todas las transacciones" (una sola vez)
 
@@ -113,7 +113,18 @@ curl -X POST \
   -d '{
     "file_name_prefix": "gastos-mp",
     "display_timezone": "GMT-03",
-    "frequency": { "type": "daily", "hour": 6 }
+    "separator": ";",
+    "header_language": "es",
+    "frequency": { "type": "daily", "hour": 6 },
+    "columns": [
+      { "key": "TRANSACTION_DATE" },
+      { "key": "TRANSACTION_TYPE" },
+      { "key": "TRANSACTION_AMOUNT" },
+      { "key": "SETTLEMENT_NET_AMOUNT" },
+      { "key": "SOURCE_ID" },
+      { "key": "EXTERNAL_REFERENCE" },
+      { "key": "DESCRIPTION" }
+    ]
   }'
 ```
 
@@ -129,12 +140,10 @@ Desde ahora, Mercado Pago va a generar solo, todos los días, un reporte con
 tus movimientos. Podés ver el primero generándose en el panel de Mercado
 Pago, en "Tu negocio > Reportes", para confirmar que quedó bien configurado.
 
-⚠️ Antes de seguir: abrí ese primer reporte (CSV) y fijate el nombre real de
-las columnas de monto, fecha y descripción contra el
-[Glosario de Todas las transacciones](https://www.mercadopago.com.ar/developers/es/docs/reports/account-money/glossary).
-En `supabase/functions/sync-mercadopago/index.ts` dejé `TRANSACTION_AMOUNT`,
-`TRANSACTION_DATE` y `DESCRIPTION` como nombres esperados — si tu reporte
-trae otros nombres, cambialos ahí antes de deployar.
+La función está preparada para el CSV con las columnas configuradas arriba.
+La sincronización usa `SETTLEMENT_NET_AMOUNT` (impacto neto en la cuenta) y
+solo carga las filas con monto negativo. Para reconocer un movimiento entre
+reportes y evitar duplicados usa `SOURCE_ID`, el tipo, la fecha y el monto.
 
 ### 3. Instalar el Supabase CLI y conectarlo a tu proyecto
 
@@ -147,7 +156,16 @@ supabase link --project-ref TU_PROJECT_REF
 (`TU_PROJECT_REF` está en la URL de tu proyecto en supabase.com, algo como
 `abcdefghijklmnop`).
 
-### 4. Guardar tus credenciales como secrets de la función
+### 4. Aplicar las migraciones a una base existente
+
+En el **SQL Editor** de Supabase ejecutá una vez el contenido de cada archivo:
+`supabase/add_external_id.sql`, `supabase/add_settings.sql`,
+`supabase/add_excluded_from_budget.sql` y
+`supabase/add_review_and_card_installments.sql`. Agregan los identificadores
+para evitar duplicados, el límite mensual, la exclusión de gastos del negocio,
+la bandeja de revisión y los datos de cuotas de tarjeta.
+
+### 5. Guardar tus credenciales como secrets de la función
 
 ```bash
 supabase secrets set MP_ACCESS_TOKEN=tu_access_token_de_mercado_pago
@@ -157,21 +175,23 @@ supabase secrets set MP_SYNC_USER_ID=tu_user_id_de_supabase
 Tu `MP_SYNC_USER_ID` es el UID de tu usuario: lo encontrás en
 **Authentication > Users** dentro del panel de Supabase.
 
-### 5. Deployar la función
+### 6. Deployar la función
 
 ```bash
 supabase functions deploy sync-mercadopago
 ```
 
-### 6. Programar que se ejecute sola todos los días
+### 7. Programar la descarga diaria
 
 En el **SQL Editor** de Supabase, corré el bloque final de
 `supabase/schema.sql` (la parte de `pg_cron` / `pg_net`), reemplazando
 `<PROJECT_REF>` y `<SERVICE_ROLE_KEY>` (esta última está en
 Settings > API > service_role — es distinta de la anon/publishable key
-que usa la app, y nunca va en el código del frontend).
+que usa la app, y nunca va en el código del frontend). El cron ejecuta la
+función a las 8am de Argentina, después del horario diario configurado en
+Mercado Pago.
 
-### 7. Probarla a mano antes de esperar 24hs
+### 8. Probarla a mano antes de esperar 24hs
 
 ```bash
 supabase functions invoke sync-mercadopago
@@ -179,10 +199,16 @@ supabase functions invoke sync-mercadopago
 
 Si devuelve `Listo: se sincronizaron N gastos`, andá a la app: deberían
 aparecer en la categoría "Sin categorizar" con la etiqueta `MP`, listos para
-que los reclasifiques con un toque.
+que los reclasifiques con un toque. Si no tienen una regla, aparecen en
+"Por revisar". Al elegir una categoría, podés guardar una regla permanente
+para futuras descripciones similares.
 
-Si tira un error de columna no encontrada, es el aviso del paso 2: ajustá
-los nombres de columna en `index.ts` y volvé a deployar.
+Desde **Configuración > Tarjeta de crédito** podés cargar el importe por cuota,
+las cuotas pendientes, la categoría y el primer mes. La app crea un movimiento
+en cada mes futuro, así queda incluido en esos presupuestos.
+
+La función selecciona reportes con estado `processed`; si todavía no hay
+ninguno, no importa movimientos y se puede volver a invocar más tarde.
 
 ## ¿Por qué comparte proyecto con la cursada?
 
