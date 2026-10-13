@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
-import { Plus, X, Trash2, Pencil, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
+import { Plus, X, Trash2, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const NEW_CATEGORY_COLORS = [
@@ -184,6 +184,7 @@ export default function Dashboard() {
   const [transactionDateTo, setTransactionDateTo] = useState("");
   const [transactionAmountMin, setTransactionAmountMin] = useState("");
   const [transactionAmountMax, setTransactionAmountMax] = useState("");
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [categoriesExpanded, setCategoriesExpanded] = useState(false);
   const [transactionsExpanded, setTransactionsExpanded] = useState(false);
   const [savingsExpanded, setSavingsExpanded] = useState(false);
@@ -403,14 +404,16 @@ export default function Dashboard() {
     .filter((transaction) => transaction.date.startsWith(previousMonthKey) && !transaction.excluded_from_budget)
     .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
   const largestCategory = categorySpend.reduce((largest, category) => category.spent > (largest?.spent || 0) ? category : largest, null);
+  const comparisonAmount = totalGastado - previousMonthSpent;
   const comparisonPct = previousMonthSpent > 0
-    ? Math.round(((totalGastado - previousMonthSpent) / previousMonthSpent) * 100)
+    ? Math.round((comparisonAmount / previousMonthSpent) * 100)
     : null;
 
   const chartData = categorySpend.filter((c) => c.spent > 0).map((c) => ({
     name: c.name,
     value: c.spent,
     color: c.color,
+    budget: Number(c.budget),
     overBudget: c.status === "over",
   }));
   const pendingReviewTx = useMemo(
@@ -859,6 +862,19 @@ export default function Dashboard() {
     if (max !== null && Number.isFinite(max) && amount > max) return false;
     return true;
   });
+  const hasTransactionFilters = Boolean(
+    transactionSearch.trim() || transactionCategory || transactionDateFrom || transactionDateTo ||
+    transactionAmountMin || transactionAmountMax
+  );
+
+  function clearTransactionFilters() {
+    setTransactionSearch("");
+    setTransactionCategory("");
+    setTransactionDateFrom("");
+    setTransactionDateTo("");
+    setTransactionAmountMin("");
+    setTransactionAmountMax("");
+  }
 
   return (
     <div className="et-app">
@@ -897,9 +913,11 @@ export default function Dashboard() {
               <div><span>GASTOS</span><strong>{budgetTx.length}</strong></div>
               <div><span>MAYOR CATEGORÍA</span><strong>{largestCategory?.spent > 0 ? largestCategory.name : "—"}</strong></div>
               <div>
-                <span>VS. MES ANTERIOR</span>
-                <strong style={{ color: comparisonPct === null ? "var(--muted)" : comparisonPct > 0 ? "var(--over)" : comparisonPct < 0 ? "var(--accent)" : "var(--muted)" }}>
-                  {comparisonPct === null ? "—" : `${comparisonPct > 0 ? "↑ " : comparisonPct < 0 ? "↓ " : ""}${Math.abs(comparisonPct)}%`}
+                <span>VS. ANTERIOR</span>
+                <strong style={{ color: comparisonAmount > 0 ? "var(--over)" : comparisonAmount < 0 ? "var(--accent)" : "var(--muted)" }}>
+                  {previousMonthSpent === 0 && totalGastado === 0
+                    ? "—"
+                    : `${comparisonAmount > 0 ? "↑ " : comparisonAmount < 0 ? "↓ " : ""}${fmt(Math.abs(comparisonAmount))}${comparisonPct === null ? "" : ` · ${Math.abs(comparisonPct)}%`}`}
                 </strong>
               </div>
             </div>
@@ -923,9 +941,10 @@ export default function Dashboard() {
                   {chartData.map((d) => (
                     <div className="et-legend-row" key={d.name}>
                       <span className="et-dot" style={{ background: d.color }} />
-                      <span className="et-legend-name" style={d.overBudget ? { color: "var(--over)", fontWeight: 700 } : undefined}>{d.name}</span>
-                      <span className="et-legend-val et-num" style={d.overBudget ? { color: "var(--over)", fontWeight: 700 } : undefined}>
-                        {Math.round((d.value / totalGastado) * 100)}% · {fmt(d.value)}
+                      <span className="et-legend-name">{d.name}</span>
+                      <span className="et-legend-value-wrap">
+                        <span className="et-legend-val et-num">{Math.round((d.value / totalGastado) * 100)}% · {fmt(d.value)}</span>
+                        {d.overBudget && <small className="et-over-amount">Excede {fmt(d.value - d.budget)}</small>}
                       </span>
                     </div>
                   ))}
@@ -989,10 +1008,11 @@ export default function Dashboard() {
                     <div className="et-budget-top">
                       <span className="et-cat-label">
                         <span className="et-dot" style={{ background: c.color }} />
-                        <span className="et-cat-name" style={c.status === "over" ? { color: "var(--over)" } : undefined}>{c.name}</span>
+                        <span className="et-cat-name">{c.name}</span>
                       </span>
                       <span className="et-cat-nums">
-                        <span className="et-num" style={c.status === "over" ? { color: "var(--over)", fontWeight: 700 } : undefined}>{fmt(c.spent)} / {fmt(c.budget)}</span>
+                        <span className="et-num">{fmt(c.spent)} / {fmt(c.budget)}</span>
+                        {c.status === "over" && <small className="et-over-amount">Excede {fmt(c.spent - c.budget)}</small>}
                       </span>
                     </div>
                     <div className="et-track">
@@ -1025,8 +1045,11 @@ export default function Dashboard() {
               <button className="et-edit-all" onClick={() => setTransactionView("review")} aria-pressed={transactionView === "review"}>
                 Por revisar{pendingReviewTx.length ? ` (${pendingReviewTx.length})` : ""}
               </button>
+              <button className="et-edit-all" onClick={() => setFiltersExpanded((expanded) => !expanded)}
+                aria-expanded={filtersExpanded}>Buscar{hasTransactionFilters ? " ·" : ""}</button>
             </div>
-            <input className="et-input et-movement-search" type="search" placeholder="Buscar descripción o categoría" value={transactionSearch} onChange={(e) => setTransactionSearch(e.target.value)} />
+            {filtersExpanded && <div className="et-search-panel">
+            <input className="et-input et-movement-search" type="search" placeholder="Descripción o categoría" value={transactionSearch} onChange={(e) => setTransactionSearch(e.target.value)} />
             <div className="et-filter-grid">
               <select className="et-select" aria-label="Filtrar por categoría" value={transactionCategory} onChange={(e) => setTransactionCategory(e.target.value)}>
                 <option value="">Todas las categorías</option>
@@ -1037,13 +1060,15 @@ export default function Dashboard() {
               <input className="et-input et-num" type="number" min="0" aria-label="Importe mínimo" placeholder="Importe mín." value={transactionAmountMin} onChange={(e) => setTransactionAmountMin(e.target.value)} />
               <input className="et-input et-num" type="number" min="0" aria-label="Importe máximo" placeholder="Importe máx." value={transactionAmountMax} onChange={(e) => setTransactionAmountMax(e.target.value)} />
             </div>
+            {hasTransactionFilters && <button className="et-edit-all et-clear-filters" onClick={clearTransactionFilters}>Limpiar filtros</button>}
+            </div>}
             {importNotice && (
               <p style={{ fontSize: 12.5, color: "var(--accent)", margin: "-6px 0 10px" }}>{importNotice}</p>
             )}
             {displayedTx.length === 0 ? (
-              <div className="et-empty">{transactionView === "review" && !transactionSearch && !transactionCategory && !transactionDateFrom && !transactionDateTo && !transactionAmountMin && !transactionAmountMax
+              <div className="et-empty">{transactionView === "review" && !hasTransactionFilters
                 ? "No hay movimientos pendientes de revisión."
-                : transactionSearch || transactionCategory || transactionDateFrom || transactionDateTo || transactionAmountMin || transactionAmountMax
+                : hasTransactionFilters
                   ? "No hay movimientos que coincidan con esos filtros."
                   : <>Todavía no hay gastos cargados en este mes.<br />Tocá "Agregar gasto" para sumar el primero.</>}</div>
             ) : (
@@ -1053,10 +1078,11 @@ export default function Dashboard() {
                   const color = cat ? cat.color : "#9B9B94";
                   return (
                     <div className="et-tx-row" key={t.id}>
+                      <button type="button" className="et-tx-main-button" aria-label={`Editar ${t.description}`} onClick={() => openTxEdit(t)}>
                       <span className="et-dot" style={{ background: color }} />
-                      <div className="et-tx-main">
-                        <div className="et-tx-desc">{t.description}</div>
-                        <div className="et-tx-meta">
+                      <span className="et-tx-main">
+                        <span className="et-tx-desc">{t.description}</span>
+                        <span className="et-tx-meta">
                           <span>{cat ? cat.name : "Sin categoría"} · {fmtDate(t.date)}</span>
                           {t.source === "mercadopago" && <span className="et-tx-badge-mp">MP</span>}
                           {t.source === "credit_card" && <span className="et-tx-badge-mp">Tarjeta</span>}
@@ -1064,13 +1090,11 @@ export default function Dashboard() {
                           {t.installment_number && <span className="et-tx-badge-mp">Cuota {t.installment_number}/{t.installment_total}</span>}
                           {t.needs_review && <span className="et-tx-badge-mp">Por revisar</span>}
                           {t.excluded_from_budget && <span className="et-tx-badge-mp">Fuera del presupuesto</span>}
-                        </div>
-                      </div>
-                      <div className="et-tx-amount et-num">-{fmt(t.amount)}</div>
-                      <div className="et-tx-actions">
-                        <button className="et-edit-btn" aria-label={`Editar ${t.description}`} onClick={() => openTxEdit(t)}><Pencil size={15} /></button>
-                        <button className="et-delete-btn" aria-label={`Eliminar ${t.description}`} disabled={deletingTxId === t.id} onClick={() => deleteTransaction(t)}><Trash2 size={15} /></button>
-                      </div>
+                        </span>
+                      </span>
+                      <span className="et-tx-amount et-num">-{fmt(t.amount)}</span>
+                      </button>
+                      <button className="et-delete-btn" aria-label={`Eliminar ${t.description}`} disabled={deletingTxId === t.id} onClick={() => deleteTransaction(t)}><Trash2 size={15} /></button>
                     </div>
                   );
                 })}
