@@ -601,6 +601,7 @@ export default function Dashboard() {
       const { error } = await supabase.from("transactions").delete().eq("id", transaction.id);
       if (error) throw error;
       setTransactions((previous) => previous.filter((item) => item.id !== transaction.id));
+      setTxEditing(null);
     } catch (error) {
       window.alert(`No se pudo eliminar: ${error.message || "error de conexión"}`);
     } finally {
@@ -1094,7 +1095,6 @@ export default function Dashboard() {
                       </span>
                       <span className="et-tx-amount et-num">-{fmt(t.amount)}</span>
                       </button>
-                      <button className="et-delete-btn" aria-label={`Eliminar ${t.description}`} disabled={deletingTxId === t.id} onClick={() => deleteTransaction(t)}><Trash2 size={15} /></button>
                     </div>
                   );
                 })}
@@ -1529,8 +1529,16 @@ export default function Dashboard() {
               <span>Excluir del presupuesto y de los totales. El movimiento seguirá guardado y visible.</span>
             </label>
             {txEditError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{txEditError}</p>}
-            <button className="et-save-btn" onClick={saveTxCategory} disabled={savingTxEdit}>
+            <button className="et-save-btn" onClick={saveTxCategory} disabled={savingTxEdit || deletingTxId !== null}>
               {savingTxEdit ? "Guardando…" : "Guardar cambios"}
+            </button>
+            <button
+              type="button"
+              className="et-delete-movement"
+              onClick={() => deleteTransaction(txEditing)}
+              disabled={deletingTxId === txEditing.id || savingTxEdit}
+            >
+              <Trash2 size={15} /> {deletingTxId === txEditing.id ? "Eliminando…" : "Eliminar movimiento"}
             </button>
           </div>
         </div>
