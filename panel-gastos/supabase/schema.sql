@@ -27,11 +27,19 @@ create table if not exists gastos.transactions (
   description text not null,
   amount numeric not null check (amount > 0),
   date date not null,
+  -- Identificador del movimiento de Mercado Pago, para impedir importaciones duplicadas.
+  external_id text,
   -- 'manual' = lo cargaste vos con el botón +
   -- 'mercadopago' = lo insertó la sincronización automática (fase 2)
   source text not null default 'manual',
   created_at timestamptz not null default now()
 );
+
+-- Aplicable también sobre instalaciones existentes. Los valores NULL de gastos
+-- anteriores/manuales pueden coexistir; los movimientos de MP se identifican.
+alter table gastos.transactions add column if not exists external_id text;
+create unique index if not exists transactions_user_external_id_uidx
+  on gastos.transactions (user_id, external_id);
 
 -- Reglas de categorización automática: si la descripción de un gasto
 -- contiene "keyword", se le asigna category_id sola.
@@ -103,14 +111,20 @@ alter default privileges in schema gastos grant all on sequences to anon, authen
 -- (supabase functions deploy sync-mercadopago), reemplazando:
 --   <PROJECT_REF>      por el ID de tu proyecto (está en la URL del panel)
 --   <SERVICE_ROLE_KEY>  por la "service_role" key de Settings > API
--- para que se ejecute sola todos los días a las 9am (hora UTC).
+-- para que se ejecute sola todos los días a las 8am (hora de Argentina),
+-- dos horas después de la generación configurada en Mercado Pago.
 
 create extension if not exists pg_cron;
 create extension if not exists pg_net;
 
+-- Reemplaza una programación previa del mismo nombre si ya existía.
+select cron.unschedule(jobid)
+from cron.job
+where jobname = 'sync-mercadopago-daily';
+
 select cron.schedule(
   'sync-mercadopago-daily',
-  '0 9 * * *',
+  '0 11 * * *',
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/sync-mercadopago',
