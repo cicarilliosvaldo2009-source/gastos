@@ -31,6 +31,11 @@ create table if not exists gastos.transactions (
   external_id text,
   -- Los movimientos de negocio se conservan, pero pueden excluirse del presupuesto personal.
   excluded_from_budget boolean not null default false,
+  -- Los movimientos automáticos sin categoría confiable pasan a la bandeja de revisión.
+  needs_review boolean not null default false,
+  installment_plan_id uuid,
+  installment_number integer,
+  installment_total integer,
   -- 'manual' = lo cargaste vos con el botón +
   -- 'mercadopago' = lo insertó la sincronización automática (fase 2)
   source text not null default 'manual',
@@ -41,6 +46,10 @@ create table if not exists gastos.transactions (
 -- anteriores/manuales pueden coexistir; los movimientos de MP se identifican.
 alter table gastos.transactions add column if not exists external_id text;
 alter table gastos.transactions add column if not exists excluded_from_budget boolean not null default false;
+alter table gastos.transactions add column if not exists needs_review boolean not null default false;
+alter table gastos.transactions add column if not exists installment_plan_id uuid;
+alter table gastos.transactions add column if not exists installment_number integer;
+alter table gastos.transactions add column if not exists installment_total integer;
 create unique index if not exists transactions_user_external_id_uidx
   on gastos.transactions (user_id, external_id);
 
