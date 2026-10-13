@@ -1066,20 +1066,17 @@ export default function Dashboard() {
           <div className="et-modal" onClick={(e) => e.stopPropagation()}>
             <div className="et-modal-head">
               <span className="et-modal-title">Configuración</span>
-              <button className="et-modal-close" aria-label="Cerrar" onClick={() => setConfigModalOpen(false)}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>
-              Sesión iniciada como <strong>{userEmail}</strong>
-              <button className="et-save-btn" style={{ marginTop: 10 }} onClick={handleLogout}>Cerrar sesión</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <button className="et-edit-all" onClick={handleLogout}>Cerrar sesión</button>
+                <button className="et-modal-close" aria-label="Cerrar" onClick={() => setConfigModalOpen(false)}>
+                  <X size={18} />
+                </button>
+              </div>
             </div>
 
             <div className="et-subhead">Presupuesto</div>
-
             <div className="et-field">
-              <label className="et-label">MÁXIMO A GASTAR POR MES</label>
+              <label className="et-label">LÍMITE MENSUAL</label>
               <input
                 className="et-input et-num"
                 type="number"
@@ -1087,42 +1084,25 @@ export default function Dashboard() {
                 onChange={(e) => setLimitDraft(e.target.value)}
               />
             </div>
-            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: -6, marginBottom: 14 }}>
-              Es el número que se usa para "Presupuesto total" y "Disponible" arriba.
-              No tiene por qué coincidir con la suma de tus categorías (hoy esa suma es {fmt(sumaCategorias)}).
-            </p>
             <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
               {savingLimit ? "Guardando…" : "Guardar"}
             </button>
             {limitError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{limitError}</p>}
 
             <div className="et-subhead">Administrar</div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openCategoriesEdit(); }}>Categorías</button>
               <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openRulesModal(); }}>Reglas</button>
             </div>
 
             <div className="et-subhead">Tarjeta de crédito</div>
-            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
-              Cargá el importe por cuota y las cuotas pendientes. La app agrega un movimiento en cada mes indicado.
-            </p>
             <button className="et-save-btn" onClick={openCardPlan}>Agregar cuotas</button>
 
             <div className="et-subhead">Débito automático</div>
-            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
-              Registrá servicios o pagos que se repiten todos los meses, sin una cantidad de cuotas definida.
-            </p>
             <button className="et-save-btn" onClick={openDebitModal}>Administrar débitos</button>
-
-            <div className="et-subhead">Mercado Pago</div>
-            <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
-              Para cargar gastos de Mercado Pago, descargá el CSV de "Todas las transacciones" y usá "Importar",
-              junto a "Movimientos". También podés importar el antiguo "Resumen de cuenta"; los movimientos ya cargados se saltean.
-            </p>
           </div>
         </div>
       )}
-
       {cardPlanModalOpen && (
         <div className="et-modal-overlay" onClick={() => !cardPlanSaving && setCardPlanModalOpen(false)}>
           <div className="et-modal" onClick={(e) => e.stopPropagation()}>
