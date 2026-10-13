@@ -394,7 +394,6 @@ export default function Dashboard() {
 
   function openConfig() {
     setLimitDraft(String(presupuestoTotal));
-    setSyncMessage("");
     setConfigModalOpen(true);
   }
 
@@ -496,11 +495,6 @@ export default function Dashboard() {
           <div className="et-empty">Cargando tu panel…</div>
         ) : (
           <div className="et-fade">
-            <div className="et-header">
-              <span className="et-header-user">{userEmail}</span>
-              <button className="et-logout" onClick={handleLogout}>Cerrar sesión</button>
-            </div>
-
             <div className="et-nav">
               <button className="et-nav-btn" aria-label="Mes anterior" onClick={() => setMonthOffset((m) => m - 1)}>
                 <ChevronLeft size={16} />
@@ -550,8 +544,6 @@ export default function Dashboard() {
             <div className="et-section-row">
               <span className="et-section-title">Presupuestos por categoría</span>
               <span className="et-section-links">
-                <button className="et-edit-all" onClick={openCategoriesEdit}>Categorías</button>
-                <button className="et-edit-all" onClick={openRulesModal}>Reglas</button>
                 <button className="et-edit-all" onClick={openConfig}>Configuración</button>
               </span>
             </div>
@@ -787,6 +779,13 @@ export default function Dashboard() {
               </button>
             </div>
 
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>
+              Sesión iniciada como <strong>{userEmail}</strong>
+              <button className="et-save-btn" style={{ marginTop: 10 }} onClick={handleLogout}>Cerrar sesión</button>
+            </div>
+
+            <div className="et-subhead">Presupuesto</div>
+
             <div className="et-field">
               <label className="et-label">MÁXIMO A GASTAR POR MES</label>
               <input
@@ -803,6 +802,12 @@ export default function Dashboard() {
             <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
               {savingLimit ? "Guardando…" : "Guardar"}
             </button>
+
+            <div className="et-subhead">Administrar</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+              <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openCategoriesEdit(); }}>Categorías</button>
+              <button className="et-save-btn" style={{ marginTop: 0 }} onClick={() => { setConfigModalOpen(false); openRulesModal(); }}>Reglas</button>
+            </div>
 
             <div className="et-subhead">Mercado Pago</div>
             <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
