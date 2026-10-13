@@ -239,43 +239,82 @@ export default function Dashboard() {
   const [importNotice, setImportNotice] = useState("");
 
   useEffect(() => {
-    (async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-      setUserEmail(user.email || "");
+    let cancelled = false;
 
-      let { data: cats } = await supabase.from("categories").select("*").order("created_at");
-      if (!cats || cats.length === 0) {
-        const { data: inserted } = await supabase.from("categories").insert(DEFAULT_CATEGORIES).select();
-        cats = inserted || [];
+    async function loadDashboard() {
+      try {
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+        if (userError) throw userError;
+        if (!user) {
+          router.replace("/login");
+          return;
+        }
+        if (cancelled) return;
+
+        setUserEmail(user.email || "");
+
+        // Estas lecturas son independientes: ejecutarlas juntas evita esperar
+        // una ida y vuelta a Supabase por cada sección del panel.
+        const [
+          { data: cats, error: categoriesError },
+          { data: rls, error: rulesError },
+          { data: settingsRow, error: settingsError },
+          { data: txs, error: transactionsError },
+          { data: recurring, error: recurringError },
+        ] = await Promise.all([
+          supabase.from("categories").select("*").order("created_at"),
+          supabase.from("category_rules").select("*").order("created_at"),
+          supabase.from("settings").select("*").maybeSingle(),
+          supabase.from("transactions").select("*").order("date", { ascending: false }),
+          supabase.from("recurring_expenses").select("*").order("created_at"),
+        ]);
+
+        const queryError = categoriesError || rulesError || settingsError || transactionsError || recurringError;
+        if (queryError) throw queryError;
+
+        let loadedCategories = cats || [];
+        if (loadedCategories.length === 0) {
+          const { data: inserted, error: insertError } = await supabase
+            .from("categories")
+            .insert(DEFAULT_CATEGORIES)
+            .select();
+          if (insertError) throw insertError;
+          loadedCategories = inserted || [];
+        }
+
+        let loadedSettings = settingsRow;
+        if (!loadedSettings) {
+          const defaultLimit = loadedCategories.reduce((sum, category) => sum + Number(category.budget), 0);
+          const { data: inserted, error: settingsInsertError } = await supabase
+            .from("settings")
+            .insert({ monthly_limit: defaultLimit })
+            .select()
+            .single();
+          if (settingsInsertError) throw settingsInsertError;
+          loadedSettings = inserted;
+        }
+
+        if (cancelled) return;
+        setCategories(loadedCategories);
+        if (loadedCategories.length > 0) {
+          setForm((formState) => ({ ...formState, categoryId: loadedCategories[0].id }));
+        }
+        setRules(rls || []);
+        setSettings(loadedSettings);
+        setTransactions(txs || []);
+        setRecurringExpenses(recurring || []);
+      } catch (error) {
+        console.error("No se pudo cargar el panel:", error);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      setCategories(cats);
-      if (cats.length > 0) setForm((f) => ({ ...f, categoryId: cats[0].id }));
+    }
 
-      const { data: rls } = await supabase.from("category_rules").select("*").order("created_at");
-      setRules(rls || []);
-
-      let { data: settingsRow } = await supabase.from("settings").select("*").maybeSingle();
-      if (!settingsRow) {
-        const defaultLimit = cats.reduce((s, c) => s + Number(c.budget), 0);
-        const { data: inserted } = await supabase
-          .from("settings")
-          .insert({ monthly_limit: defaultLimit })
-          .select()
-          .single();
-        settingsRow = inserted;
-      }
-      setSettings(settingsRow);
-
-      const { data: txs } = await supabase.from("transactions").select("*").order("date", { ascending: false });
-      setTransactions(txs || []);
-      const { data: recurring } = await supabase.from("recurring_expenses").select("*").order("created_at");
-      setRecurringExpenses(recurring || []);
-      setLoading(false);
-    })();
-  }, [supabase]);
+    loadDashboard();
+    return () => {
+      cancelled = true;
+    };
+  }, [router, supabase]);
 
   const viewDate = useMemo(() => {
     const now = new Date();
