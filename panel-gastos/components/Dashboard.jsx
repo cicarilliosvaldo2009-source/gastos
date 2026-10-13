@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
-import { Plus, X, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, X, Trash2, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const NEW_CATEGORY_COLORS = [
@@ -178,6 +178,8 @@ export default function Dashboard() {
   const [transactions, setTransactions] = useState([]);
   const [monthOffset, setMonthOffset] = useState(0);
   const [transactionView, setTransactionView] = useState("month");
+  const [categoriesExpanded, setCategoriesExpanded] = useState(false);
+  const [transactionsExpanded, setTransactionsExpanded] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -757,34 +759,6 @@ export default function Dashboard() {
               </div>
             )}
 
-            <div className="et-section-row">
-              <span className="et-section-title">Presupuestos por categoría</span>
-              <span className="et-section-links">
-                <button className="et-edit-all" onClick={openConfig}>Configuración</button>
-              </span>
-            </div>
-            <div>
-              {categorySpend.map((c) => {
-                const fillColor = c.status === "ok" ? c.color : STATUS_COLOR[c.status];
-                return (
-                  <div className="et-budget-row" key={c.id}>
-                    <div className="et-budget-top">
-                      <span className="et-cat-label">
-                        <span className="et-dot" style={{ background: c.color }} />
-                        <span className="et-cat-name">{c.name}</span>
-                      </span>
-                      <span className="et-cat-nums">
-                        <span className="et-num">{fmt(c.spent)} / {fmt(c.budget)}</span>
-                      </span>
-                    </div>
-                    <div className="et-track">
-                      <div className="et-fill" style={{ width: Math.min(c.pct, 100) + "%", background: fillColor }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
             {chartData.length > 0 && (
               <>
                 <div className="et-section-title">En qué se fue la plata</div>
@@ -813,11 +787,60 @@ export default function Dashboard() {
             )}
 
             <div className="et-section-row">
-              <span className="et-section-title">Movimientos</span>
+              <button
+                type="button"
+                className="et-edit-all"
+                onClick={() => setCategoriesExpanded((expanded) => !expanded)}
+                aria-expanded={categoriesExpanded}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, paddingLeft: 0 }}
+              >
+                <span className="et-section-title">Presupuestos por categoría</span>
+                <ChevronDown size={16} style={{ transform: categoriesExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
+              </button>
+              <span className="et-section-links">
+                <button className="et-edit-all" onClick={openConfig}>Configuración</button>
+              </span>
+            </div>
+            {categoriesExpanded && (
+            <div>
+              {categorySpend.map((c) => {
+                const fillColor = c.status === "ok" ? c.color : STATUS_COLOR[c.status];
+                return (
+                  <div className="et-budget-row" key={c.id}>
+                    <div className="et-budget-top">
+                      <span className="et-cat-label">
+                        <span className="et-dot" style={{ background: c.color }} />
+                        <span className="et-cat-name">{c.name}</span>
+                      </span>
+                      <span className="et-cat-nums">
+                        <span className="et-num">{fmt(c.spent)} / {fmt(c.budget)}</span>
+                      </span>
+                    </div>
+                    <div className="et-track">
+                      <div className="et-fill" style={{ width: Math.min(c.pct, 100) + "%", background: fillColor }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            )}
+
+            <div className="et-section-row">
+              <button
+                type="button"
+                className="et-edit-all"
+                onClick={() => setTransactionsExpanded((expanded) => !expanded)}
+                aria-expanded={transactionsExpanded}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, paddingLeft: 0 }}
+              >
+                <span className="et-section-title">Movimientos</span>
+                <ChevronDown size={16} style={{ transform: transactionsExpanded ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
+              </button>
               <button className="et-edit-all" onClick={() => fileInputRef.current && fileInputRef.current.click()}>
                 Importar
               </button>
             </div>
+            {transactionsExpanded && <>
             <div style={{ display: "flex", gap: 8, margin: "-4px 0 14px" }}>
               <button className="et-edit-all" onClick={() => setTransactionView("month")} aria-pressed={transactionView === "month"}>Este mes</button>
               <button className="et-edit-all" onClick={() => setTransactionView("review")} aria-pressed={transactionView === "review"}>
@@ -857,6 +880,8 @@ export default function Dashboard() {
                 })}
               </div>
             )}
+            </>}
+
           </div>
         )}
       </div>
