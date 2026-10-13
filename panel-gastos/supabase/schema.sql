@@ -29,6 +29,8 @@ create table if not exists gastos.transactions (
   date date not null,
   -- Identificador del movimiento de Mercado Pago, para impedir importaciones duplicadas.
   external_id text,
+  -- Los movimientos de negocio se conservan, pero pueden excluirse del presupuesto personal.
+  excluded_from_budget boolean not null default false,
   -- 'manual' = lo cargaste vos con el botón +
   -- 'mercadopago' = lo insertó la sincronización automática (fase 2)
   source text not null default 'manual',
@@ -38,6 +40,7 @@ create table if not exists gastos.transactions (
 -- Aplicable también sobre instalaciones existentes. Los valores NULL de gastos
 -- anteriores/manuales pueden coexistir; los movimientos de MP se identifican.
 alter table gastos.transactions add column if not exists external_id text;
+alter table gastos.transactions add column if not exists excluded_from_budget boolean not null default false;
 create unique index if not exists transactions_user_external_id_uidx
   on gastos.transactions (user_id, external_id);
 
