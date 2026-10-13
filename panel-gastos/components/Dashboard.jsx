@@ -46,7 +46,7 @@ function matchCategory(description, rules) {
   return found ? found.category_id : null;
 }
 
-// ---- Importación del "Resumen de cuenta" (CSV) de Mercado Pago ----
+// ---- Importación de reportes CSV de Mercado Pago ----
 function parseArNumber(raw) {
   if (raw == null) return null;
   const t = String(raw).trim().replace(/"/g, "");
@@ -54,6 +54,47 @@ function parseArNumber(raw) {
   const clean = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
   const n = parseFloat(clean);
   return Number.isFinite(n) ? n : null;
+}
+
+function parseMpCsv(text) {
+  const source = text.replace(/^\uFEFF/, "");
+  const delimiter = source.split(/\r?\n/, 1)[0].includes(";") ? ";" : ",";
+  const records = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (quoted) {
+      if (char === '"' && source[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === '"' && cell === "") {
+      quoted = true;
+    } else if (char === delimiter) {
+      row.push(cell.trim());
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell.replace(/\r$/, "").trim());
+      if (row.some((value) => value !== "")) records.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+
+  if (cell !== "" || row.length > 0) {
+    row.push(cell.replace(/\r$/, "").trim());
+    if (row.some((value) => value !== "")) records.push(row);
+  }
+  return records;
 }
 
 function parseArDate(raw) {
@@ -65,35 +106,48 @@ function parseArDate(raw) {
   return null;
 }
 
-// Devuelve { expenses, incomeCount } o null si no parece un resumen de Mercado Pago.
-// Solo toma los movimientos con monto negativo (plata que salió): los ingresos se ignoran.
+// Devuelve { expenses, incomeCount } o null si no reconoce un reporte de Mercado Pago.
+// Prefiere el impacto neto sobre la cuenta y solo importa movimientos negativos.
 function parseMpStatement(text) {
-  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
-  const headerIdx = lines.findIndex((l) => l.trim().startsWith("RELEASE_DATE"));
-  if (headerIdx === -1) return null;
-  const headers = lines[headerIdx].split(";").map((h) => h.trim());
-  const iDate = headers.indexOf("RELEASE_DATE");
+  const records = parseMpCsv(text);
+  const headerIdx = records.findIndex((record) =>
+    record.includes("TRANSACTION_DATE") || record.includes("RELEASE_DATE")
+  );
+  if (headerIdx < 0) return null;
+  const headers = records[headerIdx].map((h) => h.trim().replace(/^\uFEFF/, "").toUpperCase());
+  const iDate = headers.indexOf("TRANSACTION_DATE") >= 0
+    ? headers.indexOf("TRANSACTION_DATE")
+    : headers.indexOf("RELEASE_DATE");
   const iType = headers.indexOf("TRANSACTION_TYPE");
-  const iRef = headers.indexOf("REFERENCE_ID");
-  const iAmt = headers.indexOf("TRANSACTION_NET_AMOUNT");
-  if (iDate < 0 || iType < 0 || iAmt < 0) return null;
+  const iDescription = headers.indexOf("DESCRIPTION");
+  const iSource = headers.indexOf("SOURCE_ID");
+  const iRef = headers.indexOf("EXTERNAL_REFERENCE") >= 0
+    ? headers.indexOf("EXTERNAL_REFERENCE")
+    : headers.indexOf("REFERENCE_ID");
+  const amountColumns = ["SETTLEMENT_NET_AMOUNT", "TRANSACTION_NET_AMOUNT", "TRANSACTION_AMOUNT"]
+    .map((name) => headers.indexOf(name))
+    .filter((index) => index >= 0);
+  if (iDate < 0 || amountColumns.length === 0) return null;
 
   const seen = {};
   const expenses = [];
   let incomeCount = 0;
-  for (const line of lines.slice(headerIdx + 1)) {
-    if (!line.trim()) continue;
-    const cols = line.split(";");
-    const amount = parseArNumber(cols[iAmt]);
+  for (const cols of records.slice(headerIdx + 1)) {
+    const amount = amountColumns.map((index) => parseArNumber(cols[index])).find((value) => value !== null);
     const date = parseArDate(cols[iDate]);
     if (amount === null || !date) continue;
     if (amount >= 0) {
       incomeCount++;
       continue;
     }
-    const description = (cols[iType] || "").trim().replace(/\s+/g, " ");
-    let externalId = iRef >= 0 ? (cols[iRef] || "").trim() : "";
-    if (!externalId) externalId = `${date}|${description}|${amount}`;
+    const type = iType >= 0 ? (cols[iType] || "").trim() : "";
+    const description = ((iDescription >= 0 && cols[iDescription]) || type || "Movimiento Mercado Pago")
+      .trim()
+      .replace(/\s+/g, " ");
+    const sourceId = iSource >= 0 ? (cols[iSource] || "").trim() : "";
+    const reference = iRef >= 0 ? (cols[iRef] || "").trim() : "";
+    const identity = sourceId || reference || description;
+    let externalId = `${identity}|${type}|${date}|${amount.toFixed(2)}`;
     seen[externalId] = (seen[externalId] || 0) + 1;
     if (seen[externalId] > 1) externalId = `${externalId}#${seen[externalId]}`;
     expenses.push({ externalId, date, description, amount: Math.abs(amount) });
@@ -377,7 +431,7 @@ export default function Dashboard() {
       setImportRows([]);
       setImportInfo({ duplicates: 0, incomeCount: 0 });
       setImportError(
-        "No reconozco este archivo. Tiene que ser el CSV del \"Resumen de cuenta\" de Mercado Pago (con columnas como RELEASE_DATE y TRANSACTION_TYPE)."
+        "No reconozco este archivo. Tiene que ser un CSV de Mercado Pago con fecha, tipo de movimiento y monto."
       );
       setImportModalOpen(true);
       return;
@@ -408,7 +462,10 @@ export default function Dashboard() {
       source: "mercadopago",
       external_id: r.externalId,
     }));
-    const { data, error } = await supabase.from("transactions").insert(payload).select();
+    const { data, error } = await supabase
+      .from("transactions")
+      .upsert(payload, { onConflict: "user_id,external_id", ignoreDuplicates: true })
+      .select();
     setImporting(false);
     if (error) {
       setImportError(
@@ -749,8 +806,8 @@ export default function Dashboard() {
 
             <div className="et-subhead">Mercado Pago</div>
             <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0 }}>
-              Para traer tus gastos de Mercado Pago: descargá el CSV del "Resumen de cuenta" desde mercadopago.com.ar
-              y usá el botón "Importar" que está al lado de "Movimientos". Los gastos que ya habías importado se saltean solos.
+              Para cargar gastos de Mercado Pago, descargá el CSV de "Todas las transacciones" y usá "Importar",
+              junto a "Movimientos". También podés importar el antiguo "Resumen de cuenta"; los movimientos ya cargados se saltean.
             </p>
           </div>
         </div>
