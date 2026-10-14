@@ -16,26 +16,31 @@ create table if not exists gastos.categories (
   color text not null,
   budget numeric not null default 0,
   created_at timestamptz not null default now(),
-  unique (user_id, name)
+  unique (user_id, name),
+  unique (user_id, id)
 );
 
 -- Débitos mensuales sin fecha de finalización, pausables por el usuario.
 create table if not exists gastos.recurring_expenses (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  category_id uuid references gastos.categories (id) on delete set null,
+  category_id uuid,
   description text not null,
   amount numeric not null check (amount > 0),
   start_month date not null,
   active boolean not null default true,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique (user_id, id),
+  constraint recurring_expenses_user_category_fkey
+    foreign key (user_id, category_id)
+    references gastos.categories (user_id, id) on delete set null (category_id)
 );
 
 -- Gastos individuales
 create table if not exists gastos.transactions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  category_id uuid references gastos.categories (id) on delete set null,
+  category_id uuid,
   description text not null,
   amount numeric not null check (amount > 0),
   date date not null,
@@ -48,10 +53,16 @@ create table if not exists gastos.transactions (
   installment_plan_id uuid,
   installment_number integer,
   installment_total integer,
-  recurring_expense_id uuid references gastos.recurring_expenses (id) on delete set null,
+  recurring_expense_id uuid,
   -- Origen: carga manual, Mercado Pago, cuotas de tarjeta o débito automático.
   source text not null default 'manual',
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint transactions_user_category_fkey
+    foreign key (user_id, category_id)
+    references gastos.categories (user_id, id) on delete set null (category_id),
+  constraint transactions_user_recurring_expense_fkey
+    foreign key (user_id, recurring_expense_id)
+    references gastos.recurring_expenses (user_id, id) on delete set null (recurring_expense_id)
 );
 
 -- Aplicable también sobre instalaciones existentes. Los valores NULL de gastos
@@ -62,7 +73,7 @@ alter table gastos.transactions add column if not exists needs_review boolean no
 alter table gastos.transactions add column if not exists installment_plan_id uuid;
 alter table gastos.transactions add column if not exists installment_number integer;
 alter table gastos.transactions add column if not exists installment_total integer;
-alter table gastos.transactions add column if not exists recurring_expense_id uuid references gastos.recurring_expenses (id) on delete set null;
+alter table gastos.transactions add column if not exists recurring_expense_id uuid;
 create unique index if not exists transactions_user_external_id_uidx
   on gastos.transactions (user_id, external_id);
 
@@ -72,8 +83,11 @@ create table if not exists gastos.category_rules (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
   keyword text not null,
-  category_id uuid not null references gastos.categories (id) on delete cascade,
-  created_at timestamptz not null default now()
+  category_id uuid not null,
+  created_at timestamptz not null default now(),
+  constraint category_rules_user_category_fkey
+    foreign key (user_id, category_id)
+    references gastos.categories (user_id, id) on delete cascade
 );
 
 -- Guarda qué reporte de Mercado Pago fue el último ya procesado.
@@ -135,36 +149,39 @@ alter table gastos.monthly_budgets enable row level security;
 alter table gastos.recurring_expenses enable row level security;
 
 create policy "select propias categorias" on gastos.categories
-  for select using (auth.uid() = user_id);
+  for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propias categorias" on gastos.categories
-  for insert with check (auth.uid() = user_id);
+  for insert to authenticated with check ((select auth.uid()) = user_id);
 create policy "update propias categorias" on gastos.categories
-  for update using (auth.uid() = user_id);
+  for update to authenticated using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
 create policy "delete propias categorias" on gastos.categories
-  for delete using (auth.uid() = user_id);
+  for delete to authenticated using ((select auth.uid()) = user_id);
 
 create policy "select propios gastos" on gastos.transactions
-  for select using (auth.uid() = user_id);
+  for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propios gastos" on gastos.transactions
-  for insert with check (auth.uid() = user_id);
+  for insert to authenticated with check ((select auth.uid()) = user_id);
 create policy "update propios gastos" on gastos.transactions
-  for update using (auth.uid() = user_id);
+  for update to authenticated using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
 create policy "delete propios gastos" on gastos.transactions
-  for delete using (auth.uid() = user_id);
+  for delete to authenticated using ((select auth.uid()) = user_id);
 
 create policy "select propias reglas" on gastos.category_rules
-  for select using (auth.uid() = user_id);
+  for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propias reglas" on gastos.category_rules
-  for insert with check (auth.uid() = user_id);
+  for insert to authenticated with check ((select auth.uid()) = user_id);
 create policy "delete propias reglas" on gastos.category_rules
-  for delete using (auth.uid() = user_id);
+  for delete to authenticated using ((select auth.uid()) = user_id);
 
 create policy "select propia configuracion" on gastos.settings
-  for select using (auth.uid() = user_id);
+  for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propia configuracion" on gastos.settings
-  for insert with check (auth.uid() = user_id);
+  for insert to authenticated with check ((select auth.uid()) = user_id);
 create policy "update propia configuracion" on gastos.settings
-  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for update to authenticated using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
 
 create policy "Users can view their own Mercado Pago sync status"
   on gastos.mercadopago_sync_status
@@ -180,11 +197,12 @@ create policy "update propios presupuestos mensuales" on gastos.monthly_budgets
   with check ((select auth.uid()) = user_id);
 
 create policy "select propios debitos automaticos" on gastos.recurring_expenses
-  for select using (auth.uid() = user_id);
+  for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propios debitos automaticos" on gastos.recurring_expenses
-  for insert with check (auth.uid() = user_id);
+  for insert to authenticated with check ((select auth.uid()) = user_id);
 create policy "update propios debitos automaticos" on gastos.recurring_expenses
-  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for update to authenticated using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
 
 -- sync_state no tiene políticas: solo la Edge Function (service role,
 -- que ignora RLS) la lee y escribe.
@@ -192,10 +210,24 @@ create policy "update propios debitos automaticos" on gastos.recurring_expenses
 -- Supabase solo expone por la Data API lo que tiene permisos explícitos
 -- de Postgres (esto es obligatorio para cualquier esquema que no sea
 -- "public", y desde fines de 2026 también para proyectos existentes).
-grant usage on schema gastos to anon, authenticated, service_role;
-grant all on all tables in schema gastos to anon, authenticated, service_role;
+revoke all on schema gastos from public, anon;
+grant usage on schema gastos to authenticated, service_role;
 
-grant select, insert, update on table gastos.monthly_budgets to authenticated;
+revoke all on all tables in schema gastos from public, anon, authenticated;
+revoke all on all sequences in schema gastos from public, anon, authenticated;
+
+grant select, insert, update, delete on table gastos.categories, gastos.transactions to authenticated;
+grant select, insert, delete on table gastos.category_rules to authenticated;
+grant select, insert, update on table gastos.settings, gastos.recurring_expenses, gastos.monthly_budgets to authenticated;
+grant select on table gastos.mercadopago_sync_status to authenticated;
+grant all on all tables in schema gastos to service_role;
+
+revoke all on all sequences in schema gastos from public, anon, authenticated;
+grant all on all sequences in schema gastos to service_role;
+alter default privileges for role postgres in schema gastos revoke all on tables from public, anon, authenticated;
+alter default privileges for role postgres in schema gastos revoke all on sequences from public, anon, authenticated;
+alter default privileges for role postgres in schema gastos grant all on tables to service_role;
+alter default privileges for role postgres in schema gastos grant all on sequences to service_role;
 
 create or replace function gastos.capture_monthly_budget()
 returns trigger
@@ -227,9 +259,7 @@ from gastos.settings
 on conflict (user_id, month_start) do nothing;
 
 
-grant all on all sequences in schema gastos to anon, authenticated, service_role;
-alter default privileges in schema gastos grant all on tables to anon, authenticated, service_role;
-alter default privileges in schema gastos grant all on sequences to anon, authenticated, service_role;
+
 revoke all on table gastos.mercadopago_credentials from public, anon, authenticated;
 grant select, insert, update, delete on table gastos.mercadopago_credentials to service_role;
 
