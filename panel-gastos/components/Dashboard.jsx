@@ -186,6 +186,13 @@ export default function Dashboard() {
   const [mpSyncStatus, setMpSyncStatus] = useState(null);
   const [mpSyncStatusLoading, setMpSyncStatusLoading] = useState(true);
   const [mpSyncStatusError, setMpSyncStatusError] = useState(false);
+  const [mpConnected, setMpConnected] = useState(false);
+  const [mpConnectionLoading, setMpConnectionLoading] = useState(true);
+  const [mpConnectionSaving, setMpConnectionSaving] = useState(false);
+  const [mpAccessTokenDraft, setMpAccessTokenDraft] = useState("");
+  const [mpCredentialError, setMpCredentialError] = useState("");
+  const [mpCredentialNotice, setMpCredentialNotice] = useState("");
+  const [mpConnectionError, setMpConnectionError] = useState(false);
   const [categories, setCategories] = useState([]);
   const [rules, setRules] = useState([]);
   const [transactions, setTransactions] = useState([]);
@@ -368,30 +375,46 @@ export default function Dashboard() {
     if (!configModalOpen || !userId) return;
     let cancelled = false;
 
-    async function loadMpSyncStatus() {
+    async function loadMercadoPagoSettings() {
       setMpSyncStatusLoading(true);
+      setMpConnectionLoading(true);
+      setMpCredentialError("");
+      setMpCredentialNotice("");
       try {
-        const { data, error } = await supabase
-          .from("mercadopago_sync_status")
-          .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
-          .maybeSingle();
-        if (error) throw error;
-        if (!cancelled) {
-          setMpSyncStatus(data);
-          setMpSyncStatusError(false);
+        const [statusResult, connectionResult] = await Promise.all([
+          supabase
+            .from("mercadopago_sync_status")
+            .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
+            .maybeSingle(),
+          supabase.functions.invoke("sync-mercadopago", { body: { action: "status" } }),
+        ]);
+        if (cancelled) return;
+        if (statusResult.error) throw statusResult.error;
+        setMpSyncStatus(statusResult.data);
+        setMpSyncStatusError(false);
+        if (connectionResult.error) {
+          setMpConnected(false);
+          setMpConnectionError(true);
+        } else {
+          setMpConnected(Boolean(connectionResult.data?.connected));
+          setMpConnectionError(false);
         }
       } catch (error) {
         console.warn("No se pudo cargar el estado de Mercado Pago:", error);
         if (!cancelled) {
           setMpSyncStatus(null);
           setMpSyncStatusError(true);
+          setMpConnectionError(true);
         }
       } finally {
-        if (!cancelled) setMpSyncStatusLoading(false);
+        if (!cancelled) {
+          setMpSyncStatusLoading(false);
+          setMpConnectionLoading(false);
+        }
       }
     }
 
-    loadMpSyncStatus();
+    loadMercadoPagoSettings();
     return () => {
       cancelled = true;
     };
@@ -862,6 +885,42 @@ export default function Dashboard() {
       .update({ active: !debit.active }).eq("id", debit.id).select().single();
     if (!error && data) setRecurringExpenses((prev) => prev.map((item) => item.id === data.id ? data : item));
     else setDebitError(`No se pudo actualizar el débito: ${error?.message || "error"}`);
+  }
+
+  async function saveMercadoPagoToken() {
+    const accessToken = mpAccessTokenDraft.trim();
+    if (!accessToken) {
+      setMpCredentialError("Pegá el Access Token de Mercado Pago.");
+      return;
+    }
+
+    setMpConnectionSaving(true);
+    setMpCredentialError("");
+    setMpCredentialNotice("");
+    try {
+      const { data, error } = await supabase.functions.invoke("sync-mercadopago", {
+        body: { action: "connect", accessToken },
+      });
+      if (error) {
+        let message = "No se pudo conectar Mercado Pago.";
+        try {
+          const responseBody = await error.context?.json();
+          if (responseBody?.error) message = responseBody.error;
+        } catch {}
+        throw new Error(message);
+      }
+      if (!data?.connected) throw new Error(data?.error || "No se pudo guardar el Access Token.");
+
+      setMpConnected(true);
+      setMpConnectionError(false);
+      setMpSyncStatus(data.syncStatus || null);
+      setMpCredentialNotice(data.message || "Mercado Pago quedó conectado.");
+      setMpAccessTokenDraft("");
+    } catch (error) {
+      setMpCredentialError(error.message || "No se pudo guardar el Access Token.");
+    } finally {
+      setMpConnectionSaving(false);
+    }
   }
 
   function openConfig() {
@@ -1440,6 +1499,44 @@ export default function Dashboard() {
             </div>
 
             <div className="et-subhead">Mercado Pago</div>
+            <div className="et-sync-card" role="status" aria-live="polite">
+              {mpConnectionLoading ? (
+                <span className="et-sync-muted">Verificando conexión…</span>
+              ) : mpConnectionError ? (
+                <span className="et-sync-muted">No se pudo verificar la conexión.</span>
+              ) : (
+                <span className="et-sync-status-line">
+                  <span className={`et-sync-dot ${mpConnected ? "success" : "error"}`} />
+                  <strong>{mpConnected ? "Conectado · reporte diario activo" : "No conectado"}</strong>
+                </span>
+              )}
+            </div>
+            <div className="et-field">
+              <label className="et-label" htmlFor="mp-access-token">ACCESS TOKEN</label>
+              <input
+                id="mp-access-token"
+                className="et-input"
+                type="password"
+                value={mpAccessTokenDraft}
+                onChange={(e) => setMpAccessTokenDraft(e.target.value)}
+                placeholder={mpConnected ? "Pegá otro token para reemplazarlo" : "Pegá el Access Token"}
+                autoComplete="new-password"
+                spellCheck={false}
+              />
+            </div>
+            <button
+              type="button"
+              className="et-save-btn"
+              onClick={saveMercadoPagoToken}
+              disabled={mpConnectionSaving || !mpAccessTokenDraft.trim()}
+            >
+              {mpConnectionSaving ? "Conectando…" : mpConnected ? "Actualizar token" : "Conectar Mercado Pago"}
+            </button>
+            <p className="et-sync-muted" style={{ fontSize: 11, lineHeight: 1.4, margin: "7px 0 0" }}>
+              Solo necesitás el Access Token. Se guarda en el servidor y no vuelve a mostrarse.
+            </p>
+            {mpCredentialError && <p role="alert" style={{ fontSize: 12, color: "var(--over)", lineHeight: 1.4 }}>{mpCredentialError}</p>}
+            {mpCredentialNotice && <p role="status" style={{ fontSize: 12, color: "var(--accent)", lineHeight: 1.4 }}>{mpCredentialNotice}</p>}
             <div className="et-sync-card" role="status" aria-live="polite">
               {mpSyncStatusLoading ? (
                 <span className="et-sync-muted">Consultando estado…</span>

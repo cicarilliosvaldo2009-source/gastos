@@ -83,6 +83,29 @@ create table if not exists gastos.sync_state (
   synced_at timestamptz
 );
 
+-- Los Access Tokens individuales quedan disponibles solo para la Edge Function.
+create table if not exists gastos.mercadopago_credentials (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  access_token text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table gastos.mercadopago_credentials enable row level security;
+  
+-- Estado visible solo para el dueño; escritura exclusiva de la Edge Function.
+create table if not exists gastos.mercadopago_sync_status (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  last_checked_at timestamptz,
+  last_status text not null default 'unknown'
+    check (last_status in ('unknown', 'success', 'error')),
+  imported_count integer not null default 0 check (imported_count >= 0),
+  skipped_count integer not null default 0 check (skipped_count >= 0),
+  last_message text,
+  updated_at timestamptz not null default now()
+);
+alter table gastos.mercadopago_sync_status enable row level security;
+
+
 -- Límite mensual global de gastos, configurable por cada usuario.
 create table if not exists gastos.settings (
   id uuid primary key default gen_random_uuid(),
@@ -143,6 +166,11 @@ create policy "insert propia configuracion" on gastos.settings
 create policy "update propia configuracion" on gastos.settings
   for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+create policy "Users can view their own Mercado Pago sync status"
+  on gastos.mercadopago_sync_status
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
+
 create policy "select propios presupuestos mensuales" on gastos.monthly_budgets
   for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propios presupuestos mensuales" on gastos.monthly_budgets
@@ -202,6 +230,13 @@ on conflict (user_id, month_start) do nothing;
 grant all on all sequences in schema gastos to anon, authenticated, service_role;
 alter default privileges in schema gastos grant all on tables to anon, authenticated, service_role;
 alter default privileges in schema gastos grant all on sequences to anon, authenticated, service_role;
+revoke all on table gastos.mercadopago_credentials from public, anon, authenticated;
+grant select, insert, update, delete on table gastos.mercadopago_credentials to service_role;
+
+revoke all on table gastos.mercadopago_sync_status from public, anon, authenticated;
+grant select on table gastos.mercadopago_sync_status to authenticated;
+grant select, insert, update on table gastos.mercadopago_sync_status to service_role;
+
 
 -- Nota: las categorías por defecto (Comida, Transporte, Servicios, Ocio,
 -- Salud, Otros) las crea la propia app la primera vez que entrás, si
