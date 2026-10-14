@@ -190,6 +190,7 @@ export default function Dashboard() {
   const [mpConnectionLoading, setMpConnectionLoading] = useState(true);
   const [mpConnectionSaving, setMpConnectionSaving] = useState(false);
   const [mpAccessTokenDraft, setMpAccessTokenDraft] = useState("");
+  const [mpTokenEditing, setMpTokenEditing] = useState(false);
   const [mpCredentialError, setMpCredentialError] = useState("");
   const [mpCredentialNotice, setMpCredentialNotice] = useState("");
   const [mpConnectionError, setMpConnectionError] = useState(false);
@@ -916,6 +917,7 @@ export default function Dashboard() {
       setMpSyncStatus(data.syncStatus || null);
       setMpCredentialNotice(data.message || "Mercado Pago quedó conectado.");
       setMpAccessTokenDraft("");
+      setMpTokenEditing(false);
     } catch (error) {
       setMpCredentialError(error.message || "No se pudo guardar el Access Token.");
     } finally {
@@ -927,6 +929,10 @@ export default function Dashboard() {
     setLimitDraft(String(settings?.monthly_limit > 0 ? settings.monthly_limit : sumaCategorias));
     setLimitEditing(false);
     setLimitError("");
+    setMpTokenEditing(false);
+    setMpAccessTokenDraft("");
+    setMpCredentialError("");
+    setMpCredentialNotice("");
     setConfigModalOpen(true);
   }
 
@@ -1409,167 +1415,247 @@ export default function Dashboard() {
       )}
 
       {configModalOpen && (
-        <div className="et-modal-overlay" onClick={() => setConfigModalOpen(false)}>
-          <div className="et-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="et-modal-head">
-              <span className="et-modal-title">Configuración</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <button className="et-edit-all" onClick={handleLogout}>Cerrar sesión</button>
+        <div className="et-modal-overlay et-settings-overlay" onClick={() => setConfigModalOpen(false)}>
+          <div className="et-modal et-settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="et-settings-header">
+              <div className="et-settings-heading">
+                <span className="et-settings-eyebrow">Panel de Gastos</span>
+                <h2>Configuración</h2>
+                <span className="et-settings-account-email">{userEmail}</span>
+              </div>
+              <div className="et-settings-header-actions">
+                <button className="et-settings-logout" onClick={handleLogout}>Cerrar sesión</button>
                 <button className="et-modal-close" aria-label="Cerrar" onClick={() => setConfigModalOpen(false)}>
                   <X size={18} />
                 </button>
               </div>
             </div>
 
-            <div className="et-subhead">Administrar</div>
-            <div className="et-settings-grid">
-              <button className="et-menu-btn" onClick={() => { setLimitEditing((editing) => !editing); setLimitError(""); }} aria-expanded={limitEditing}>
-                {limitEditing ? "Cancelar" : "Cambiar límite"}
-              </button>
-              <button className="et-menu-btn" onClick={() => { setConfigModalOpen(false); openCategoriesEdit(); }}>Categorías</button>
-              <button className="et-menu-btn" onClick={() => { setConfigModalOpen(false); openRulesModal(); }}>Reglas</button>
-            </div>
-
-            {limitEditing && (
-              <>
-                <div className="et-field">
-                  <label className="et-label">LÍMITE MENSUAL</label>
-                  <input
-                    className="et-input et-num"
-                    type="number"
-                    value={limitDraft}
-                    onChange={(e) => setLimitDraft(e.target.value)}
-                  />
-                </div>
-                <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
-                  {savingLimit ? "Guardando…" : "Guardar"}
-                </button>
-                {limitError && <p role="alert" style={{ fontSize: 12.5, color: "var(--over)", lineHeight: 1.5 }}>{limitError}</p>}
-              </>
-            )}
-
-            <div className="et-subhead">Tarjeta de crédito</div>
-            <button className="et-menu-btn" onClick={openCardPlan}>Agregar cuotas</button>
-
-            <div className="et-subhead">Débito automático</div>
-            <button className="et-menu-btn" onClick={openDebitModal}>Administrar débitos</button>
-
-            <div className="et-subhead">Sobrante mes a mes</div>
-            <button className="et-menu-btn" onClick={() => { setConfigModalOpen(false); setSavingsModalOpen(true); }}>
-              Ver gastos por mes
-            </button>
-
-            <div className="et-subhead">Proyección del mes</div>
-            <div className="et-projection-card">
-              {currentMonthProjection.observedSpent > 0 ? (
-                <>
-                  <span className="et-projection-label">A este ritmo, terminarías gastando</span>
-                  <strong className="et-projection-amount et-num">~{fmt(currentMonthProjection.projectedSpent)}</strong>
-                  <span className="et-projection-note">
-                    Basado en {currentMonthProjection.daysElapsed} de {currentMonthProjection.daysInMonth} días e incluye cuotas y débitos previstos.
-                  </span>
-                  {currentMonthProjection.limit !== null && (
-                    <>
-                      <div className="et-projection-track">
-                        <div
-                          className="et-projection-fill"
-                          style={{
-                            width: `${Math.min((currentMonthProjection.projectedSpent / currentMonthProjection.limit) * 100, 100)}%`,
-                            background: currentMonthProjection.projectedRemainder < 0 ? "var(--over)" : "var(--accent)",
-                          }}
-                        />
-                      </div>
-                      <span className="et-projection-balance" style={{ color: currentMonthProjection.projectedRemainder < 0 ? "var(--over)" : "var(--accent)" }}>
-                        {currentMonthProjection.projectedRemainder < 0
-                          ? `Superarías el límite por ${fmt(Math.abs(currentMonthProjection.projectedRemainder))}`
-                          : `Quedarían ${fmt(currentMonthProjection.projectedRemainder)} disponibles`}
-                      </span>
-                    </>
-                  )}
-                </>
-              ) : currentMonthProjection.fixedCommitments > 0 ? (
-                <>
-                  <span className="et-projection-label">Cuotas y débitos previstos</span>
-                  <strong className="et-projection-amount et-num">{fmt(currentMonthProjection.fixedCommitments)}</strong>
-                  <span className="et-projection-note">Aún no hay suficientes gastos del día a día para estimar el cierre.</span>
-                </>
-              ) : (
-                <span className="et-projection-note">Todavía no hay gastos cargados este mes para estimar.</span>
-              )}
-            </div>
-
-            <div className="et-subhead">Mercado Pago</div>
-            <div className="et-sync-card" role="status" aria-live="polite">
-              {mpConnectionLoading ? (
-                <span className="et-sync-muted">Verificando conexión…</span>
-              ) : mpConnectionError ? (
-                <span className="et-sync-muted">No se pudo verificar la conexión.</span>
-              ) : (
-                <span className="et-sync-status-line">
-                  <span className={`et-sync-dot ${mpConnected ? "success" : "error"}`} />
-                  <strong>{mpConnected ? "Conectado · reporte diario activo" : "No conectado"}</strong>
-                </span>
-              )}
-            </div>
-            <div className="et-field">
-              <label className="et-label" htmlFor="mp-access-token">ACCESS TOKEN</label>
-              <input
-                id="mp-access-token"
-                className="et-input"
-                type="password"
-                value={mpAccessTokenDraft}
-                onChange={(e) => setMpAccessTokenDraft(e.target.value)}
-                placeholder={mpConnected ? "Pegá otro token para reemplazarlo" : "Pegá el Access Token"}
-                autoComplete="new-password"
-                spellCheck={false}
-              />
-            </div>
-            <button
-              type="button"
-              className="et-save-btn"
-              onClick={saveMercadoPagoToken}
-              disabled={mpConnectionSaving || !mpAccessTokenDraft.trim()}
-            >
-              {mpConnectionSaving ? "Conectando…" : mpConnected ? "Actualizar token" : "Conectar Mercado Pago"}
-            </button>
-            <p className="et-sync-muted" style={{ fontSize: 11, lineHeight: 1.4, margin: "7px 0 0" }}>
-              Solo necesitás el Access Token. Se guarda en el servidor y no vuelve a mostrarse.
-            </p>
-            {mpCredentialError && <p role="alert" style={{ fontSize: 12, color: "var(--over)", lineHeight: 1.4 }}>{mpCredentialError}</p>}
-            {mpCredentialNotice && <p role="status" style={{ fontSize: 12, color: "var(--accent)", lineHeight: 1.4 }}>{mpCredentialNotice}</p>}
-            <div className="et-sync-card" role="status" aria-live="polite">
-              {mpSyncStatusLoading ? (
-                <span className="et-sync-muted">Consultando estado…</span>
-              ) : mpSyncStatusError ? (
-                <span className="et-sync-muted">No se pudo consultar el estado.</span>
-              ) : !mpSyncStatus?.last_checked_at ? (
-                <span className="et-sync-muted">Todavía no hay consultas automáticas registradas.</span>
-              ) : (
-                <>
-                  <div className="et-sync-status-line">
-                    <span className={`et-sync-dot ${mpSyncStatus.last_status === "success" ? "success" : "error"}`} />
-                    <strong>{mpSyncStatus.last_status === "success" ? "Última consulta correcta" : "Falló la última consulta"}</strong>
+            <div className="et-settings-body">
+              <section className="et-settings-card">
+                <div className="et-settings-section-heading">
+                  <div>
+                    <span className="et-settings-kicker">Presupuesto</span>
+                    <h3>Límite mensual</h3>
                   </div>
-                  <div className="et-sync-meta">{fmtDateTime(mpSyncStatus.last_checked_at)}</div>
-                  {mpSyncStatus.last_status === "success" && (
-                    <div className="et-sync-counts">
-                      {mpSyncStatus.imported_count > 0
-                        ? `${mpSyncStatus.imported_count} agregados`
-                        : "Sin movimientos nuevos"}
-                      {mpSyncStatus.skipped_count > 0 ? ` · ${mpSyncStatus.skipped_count} duplicados omitidos` : ""}
+                  <strong className="et-settings-current-value et-num">{fmt(presupuestoTotal)}</strong>
+                </div>
+                <button
+                  className="et-settings-inline-action"
+                  onClick={() => { setLimitEditing((editing) => !editing); setLimitError(""); }}
+                  aria-expanded={limitEditing}
+                >
+                  {limitEditing ? "Cancelar cambio" : "Cambiar límite"}
+                </button>
+                {limitEditing && (
+                  <div className="et-settings-limit-editor">
+                    <div className="et-field">
+                      <label className="et-label" htmlFor="monthly-limit">Límite mensual</label>
+                      <input
+                        id="monthly-limit"
+                        className="et-input et-num"
+                        type="number"
+                        value={limitDraft}
+                        onChange={(e) => setLimitDraft(e.target.value)}
+                      />
+                    </div>
+                    <button className="et-save-btn" onClick={saveLimit} disabled={savingLimit}>
+                      {savingLimit ? "Guardando…" : "Guardar límite"}
+                    </button>
+                    {limitError && <p role="alert" className="et-settings-error">{limitError}</p>}
+                  </div>
+                )}
+                <div className="et-settings-admin-grid">
+                  <button className="et-settings-tile" onClick={() => { setConfigModalOpen(false); openCategoriesEdit(); }}>
+                    <span>Organizar</span><strong>Categorías</strong>
+                  </button>
+                  <button className="et-settings-tile" onClick={() => { setConfigModalOpen(false); openRulesModal(); }}>
+                    <span>Automatizar</span><strong>Reglas</strong>
+                  </button>
+                </div>
+              </section>
+
+              <section className="et-settings-card">
+                <div className="et-settings-section-heading">
+                  <div>
+                    <span className="et-settings-kicker">Pagos previstos</span>
+                    <h3>Cuotas y débitos</h3>
+                  </div>
+                </div>
+                <div className="et-settings-payment-grid">
+                  <div className="et-settings-payment-tile">
+                    <div><strong>Tarjeta de crédito</strong><span>Cuotas por mes</span></div>
+                    <button className="et-settings-tile-action" onClick={openCardPlan}>Agregar cuotas</button>
+                  </div>
+                  <div className="et-settings-payment-tile">
+                    <div><strong>Débito automático</strong><span>Pagos recurrentes</span></div>
+                    <button className="et-settings-tile-action" onClick={openDebitModal}>Administrar</button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="et-settings-card et-settings-savings-card">
+                <div className="et-settings-section-heading">
+                  <div>
+                    <span className="et-settings-kicker">Seguimiento</span>
+                    <h3>Sobrante mes a mes</h3>
+                  </div>
+                  <button
+                    className="et-settings-outline-action"
+                    onClick={() => { setConfigModalOpen(false); setSavingsModalOpen(true); }}
+                  >
+                    Ver historial
+                  </button>
+                </div>
+                <div className="et-settings-projection">
+                  <div className="et-settings-projection-copy">
+                    <span className="et-settings-kicker">Proyección del mes</span>
+                    {currentMonthProjection.observedSpent > 0 ? (
+                      <>
+                        <span className="et-projection-label">Al ritmo actual, cerrarías en</span>
+                        <strong className="et-projection-amount et-num">~{fmt(currentMonthProjection.projectedSpent)}</strong>
+                        {currentMonthProjection.limit !== null && (
+                          <span
+                            className="et-projection-balance"
+                            style={{ color: currentMonthProjection.projectedRemainder < 0 ? "var(--over)" : "var(--accent)" }}
+                          >
+                            {currentMonthProjection.projectedRemainder < 0
+                              ? "Sobre el límite por " + fmt(Math.abs(currentMonthProjection.projectedRemainder))
+                              : "Quedarían " + fmt(currentMonthProjection.projectedRemainder)}
+                          </span>
+                        )}
+                      </>
+                    ) : currentMonthProjection.fixedCommitments > 0 ? (
+                      <>
+                        <strong className="et-projection-amount et-num">{fmt(currentMonthProjection.fixedCommitments)}</strong>
+                        <span className="et-projection-note">Cuotas y débitos previstos</span>
+                      </>
+                    ) : (
+                      <span className="et-projection-note">Sin gastos para proyectar este mes.</span>
+                    )}
+                  </div>
+                  {currentMonthProjection.observedSpent > 0 && currentMonthProjection.limit !== null && (
+                    <div className="et-projection-track">
+                      <div
+                        className="et-projection-fill"
+                        style={{
+                          width: Math.min((currentMonthProjection.projectedSpent / currentMonthProjection.limit) * 100, 100) + "%",
+                          background: currentMonthProjection.projectedRemainder < 0 ? "var(--over)" : "var(--accent)",
+                        }}
+                      />
                     </div>
                   )}
-                  {mpSyncStatus.last_message && <p className="et-sync-message">{mpSyncStatus.last_message}</p>}
-                </>
-              )}
+                </div>
+              </section>
+
+              <section className="et-settings-card et-settings-mp-card">
+                <div className="et-settings-section-heading">
+                  <div>
+                    <span className="et-settings-kicker">Integración</span>
+                    <h3>Mercado Pago</h3>
+                  </div>
+                  {!mpConnectionLoading && !mpConnectionError && (
+                    <span className={"et-settings-connection-pill " + (mpConnected ? "connected" : "disconnected")}>
+                      <span className={"et-sync-dot " + (mpConnected ? "success" : "error")} />
+                      {mpConnected ? "Conectado" : "Desconectado"}
+                    </span>
+                  )}
+                </div>
+
+                <div className="et-settings-sync-panel" role="status" aria-live="polite">
+                  {mpConnectionLoading ? (
+                    <span className="et-sync-muted">Verificando conexión…</span>
+                  ) : mpConnectionError ? (
+                    <span className="et-sync-muted">No se pudo verificar la conexión.</span>
+                  ) : mpConnected ? (
+                    <strong>Reporte diario activo</strong>
+                  ) : (
+                    <span>Conectá tu cuenta para sincronizar gastos a diario.</span>
+                  )}
+                  {mpConnectionLoading ? null : mpConnectionError ? null : mpConnected ? (
+                    <button
+                      type="button"
+                      className="et-settings-inline-action"
+                      onClick={() => { setMpTokenEditing(true); setMpAccessTokenDraft(""); setMpCredentialError(""); setMpCredentialNotice(""); }}
+                    >
+                      Cambiar token
+                    </button>
+                  ) : null}
+                </div>
+
+                {(!mpConnectionLoading && (!mpConnected || mpTokenEditing)) && (
+                  <div className="et-settings-token-editor">
+                    <div className="et-field">
+                      <label className="et-label" htmlFor="mp-access-token">Access Token</label>
+                      <input
+                        id="mp-access-token"
+                        className="et-input"
+                        type="password"
+                        value={mpAccessTokenDraft}
+                        onChange={(e) => setMpAccessTokenDraft(e.target.value)}
+                        placeholder="Pegá el Access Token"
+                        autoComplete="new-password"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <div className="et-settings-token-actions">
+                      <button
+                        type="button"
+                        className="et-save-btn"
+                        onClick={saveMercadoPagoToken}
+                        disabled={mpConnectionSaving || !mpAccessTokenDraft.trim()}
+                      >
+                        {mpConnectionSaving ? "Conectando…" : mpConnected ? "Actualizar token" : "Conectar Mercado Pago"}
+                      </button>
+                      {mpConnected && (
+                        <button
+                          type="button"
+                          className="et-settings-cancel-action"
+                          onClick={() => { setMpTokenEditing(false); setMpAccessTokenDraft(""); setMpCredentialError(""); setMpCredentialNotice(""); }}
+                          disabled={mpConnectionSaving}
+                        >
+                          Cancelar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {mpCredentialError && <p role="alert" className="et-settings-error">{mpCredentialError}</p>}
+                {mpCredentialNotice && <p role="status" className="et-settings-notice">{mpCredentialNotice}</p>}
+
+                <div className="et-settings-sync-history" role="status" aria-live="polite">
+                  <span className="et-settings-kicker">Última sincronización</span>
+                  {mpSyncStatusLoading ? (
+                    <span className="et-sync-muted">Consultando estado…</span>
+                  ) : mpSyncStatusError ? (
+                    <span className="et-sync-muted">No se pudo consultar el estado.</span>
+                  ) : !mpSyncStatus?.last_checked_at ? (
+                    <span className="et-sync-muted">Todavía no hay consultas automáticas registradas.</span>
+                  ) : (
+                    <>
+                      <strong>{mpSyncStatus.last_status === "success" ? "Correcta" : "Fallida"}</strong>
+                      <span className="et-sync-meta">{fmtDateTime(mpSyncStatus.last_checked_at)}</span>
+                      {mpSyncStatus.last_status === "success" && (
+                        <span className="et-sync-counts">
+                          {mpSyncStatus.imported_count > 0 ? mpSyncStatus.imported_count + " agregados" : "Sin movimientos nuevos"}
+                          {mpSyncStatus.skipped_count > 0 ? " · " + mpSyncStatus.skipped_count + " duplicados omitidos" : ""}
+                        </span>
+                      )}
+                      {mpSyncStatus.last_message && <span className="et-sync-message">{mpSyncStatus.last_message}</span>}
+                    </>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  className="et-settings-import-action"
+                  onClick={() => { setConfigModalOpen(false); fileInputRef.current?.click(); }}
+                >
+                  Importar CSV
+                </button>
+              </section>
             </div>
-            <button
-              type="button"
-              className="et-menu-btn et-import-settings-btn"
-              onClick={() => { setConfigModalOpen(false); fileInputRef.current?.click(); }}
-            >
-              Importar reporte de Mercado Pago
-            </button>
           </div>
         </div>
       )}
