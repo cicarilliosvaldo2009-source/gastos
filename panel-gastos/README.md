@@ -12,9 +12,8 @@ y organiza gastos.
 
 1. Entrá a https://supabase.com y abrí el proyecto que vayas a usar (nuevo o uno que ya tengas).
 2. Andá a **SQL Editor** y pegá el contenido de `supabase/schema.sql`. Ejecutalo.
-   Esto crea el esquema `gastos` con las tablas `categories`, `transactions`,
-   `category_rules` y `sync_state`, y las políticas de seguridad (RLS) para
-   que solo vos puedas ver y modificar tus datos.
+   Esto crea el esquema `gastos` y activa políticas RLS para que cada cuenta
+   solo pueda ver y modificar sus propios movimientos y configuración.
 3. Para permitir que otras personas creen cuentas desde la app, andá a
    **Authentication > Providers > Email** y habilitá **Allow new users to sign up**.
    Mantené la confirmación por correo activada.
@@ -52,9 +51,8 @@ Probalo local:
 npm run dev
 ```
 
-Abrí http://localhost:3000, iniciá sesión con el usuario que creaste en el
-paso 1.4, y deberías ver el panel con las 6 categorías por defecto
-(Comida, Transporte, Servicios, Ocio, Salud, Otros) ya cargadas y en $0.
+Abrí http://localhost:3000 y elegí **Crear cuenta**. Después de confirmar el
+correo, vas a ver el panel con las 6 categorías iniciales ya cargadas.
 
 ## 3. Subir a GitHub
 
@@ -82,9 +80,9 @@ movimientos, categorías y límites separados.
 
 ## Sobre el botón "+"
 
-El botón "+" sirve para los gastos que cargás manualmente. Cuando completes
-la Fase 2, Mercado Pago se sincronizará a diario. Vas a seguir usando el botón
-para lo que Mercado Pago no vea (efectivo, gastos compartidos, etc.)
+El botón "+" sirve para los gastos que cargás manualmente. Cada cuenta puede
+conectar su propio Mercado Pago para sincronizarlo a diario. Vas a seguir usando
+el botón para lo que Mercado Pago no vea (efectivo, gastos compartidos, etc.)
 — por eso cada gasto tiene una etiqueta `manual` o `MP` junto a la fecha,
 para que después puedas distinguir lo que cargaste vos de lo que entró solo.
 
@@ -159,17 +157,11 @@ que usa la app, y nunca va en el código del frontend). El cron ejecuta la
 función a las 8am de Argentina, después del horario diario configurado en
 Mercado Pago.
 
-### 8. Probarla a mano antes de esperar 24hs
+### 8. Verificar la primera sincronización
 
-```bash
-supabase functions invoke sync-mercadopago
-```
-
-Si devuelve `Listo: se sincronizaron N gastos`, andá a la app: deberían
-aparecer en la categoría "Sin categorizar" con la etiqueta `MP`, listos para
-que los reclasifiques con un toque. Si no tienen una regla, aparecen en
-"Por revisar". Al elegir una categoría, podés guardar una regla permanente
-para futuras descripciones similares.
+Al conectar el token desde **Configuración > Mercado Pago**, la app hace una
+primera consulta y muestra su resultado ahí mismo. Los movimientos que no
+coincidan con una regla quedan en **Por revisar** para que les asignes categoría.
 
 Desde **Configuración > Tarjeta de crédito** podés cargar el importe por cuota,
 las cuotas pendientes, la categoría y el primer mes. La app crea un movimiento
