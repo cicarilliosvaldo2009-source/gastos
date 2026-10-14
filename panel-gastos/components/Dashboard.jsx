@@ -1647,13 +1647,6 @@ export default function Dashboard() {
                   )}
                 </div>
 
-                <button
-                  type="button"
-                  className="et-settings-import-action"
-                  onClick={() => { setConfigModalOpen(false); fileInputRef.current?.click(); }}
-                >
-                  Importar CSV
-                </button>
               </section>
             </div>
           </div>
