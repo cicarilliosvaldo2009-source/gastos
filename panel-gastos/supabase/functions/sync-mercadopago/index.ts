@@ -1,11 +1,55 @@
-// Descarga el último reporte procesado de "Todas las transacciones" y agrega
-// a gastos.transactions los movimientos cuyo impacto neto fue una salida.
+// Administra conexiones individuales de Mercado Pago y procesa sus reportes diarios.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const MP_TOKEN = Deno.env.get("MP_ACCESS_TOKEN")!;
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const SYNC_USER_ID = Deno.env.get("MP_SYNC_USER_ID")!;
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const LEGACY_MP_TOKEN = Deno.env.get("MP_ACCESS_TOKEN") ?? "";
+const LEGACY_USER_ID = Deno.env.get("MP_SYNC_USER_ID") ?? "";
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, apikey, x-client-info, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+  });
+}
+
+function getJwtRole(token: string) {
+  try {
+    const payloadPart = token.split(".")[1];
+    if (!payloadPart) return null;
+    const base64 = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const bytes = Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes)).role ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function createAdminClient() {
+  if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Falta la configuración interna de Supabase.");
+  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+    db: { schema: "gastos" },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+async function getAuthenticatedUser(token: string) {
+  const apiKey = Deno.env.get("SUPABASE_ANON_KEY") || SERVICE_ROLE_KEY;
+  const authClient = createClient(SUPABASE_URL, apiKey, {
+    global: { headers: { Authorization: "Bearer " + token } },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await authClient.auth.getUser(token);
+  if (error || !data.user) throw new Error("La sesión no es válida. Volvé a iniciar sesión.");
+  return data.user;
+}
 
 function parseCsv(text: string) {
   const source = text.replace(/^\uFEFF/, "");
@@ -16,28 +60,28 @@ function parseCsv(text: string) {
   let quoted = false;
 
   for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
+    const character = source[i];
     if (quoted) {
-      if (char === '"' && source[i + 1] === '"') {
+      if (character === '"' && source[i + 1] === '"') {
         cell += '"';
         i += 1;
-      } else if (char === '"') {
+      } else if (character === '"') {
         quoted = false;
       } else {
-        cell += char;
+        cell += character;
       }
-    } else if (char === '"' && cell === "") {
+    } else if (character === '"' && cell === "") {
       quoted = true;
-    } else if (char === delimiter) {
+    } else if (character === delimiter) {
       row.push(cell.trim());
       cell = "";
-    } else if (char === "\n") {
+    } else if (character === "\n") {
       row.push(cell.replace(/\r$/, "").trim());
       if (row.some((value) => value !== "")) records.push(row);
       row = [];
       cell = "";
     } else {
-      cell += char;
+      cell += character;
     }
   }
 
@@ -50,7 +94,10 @@ function parseCsv(text: string) {
     record.includes("TRANSACTION_DATE") || record.includes("RELEASE_DATE")
   );
   if (headerIndex < 0) throw new Error("No encontré el encabezado del reporte de Mercado Pago.");
-  return { headers: records[headerIndex].map((value) => value.toUpperCase()), rows: records.slice(headerIndex + 1) };
+  return {
+    headers: records[headerIndex].map((value) => value.toUpperCase()),
+    rows: records.slice(headerIndex + 1),
+  };
 }
 
 function parseAmount(raw: string | undefined) {
@@ -67,9 +114,9 @@ function parseDate(raw: string | undefined) {
   if (!raw) return null;
   const value = raw.trim();
   const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  if (iso) return iso[1] + "-" + iso[2] + "-" + iso[3];
   const local = value.match(/^(\d{2})[-/](\d{2})[-/](\d{4})/);
-  if (local) return `${local[3]}-${local[2]}-${local[1]}`;
+  if (local) return local[3] + "-" + local[2] + "-" + local[1];
   return null;
 }
 
@@ -80,10 +127,10 @@ function currentArgentinaMonth() {
     month: "2-digit",
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-01`;
+  return values.year + "-" + values.month + "-01";
 }
 
-async function generateAutomaticDebits(supabase: ReturnType<typeof createClient>) {
+async function generateAutomaticDebits(supabase: ReturnType<typeof createAdminClient>) {
   const monthStart = currentArgentinaMonth();
   const { data: debits, error: debitError } = await supabase
     .from("recurring_expenses")
@@ -100,7 +147,7 @@ async function generateAutomaticDebits(supabase: ReturnType<typeof createClient>
     amount: debit.amount,
     date: monthStart,
     source: "automatic_debit",
-    external_id: `automatic-debit:${debit.id}:${monthStart.slice(0, 7)}`,
+    external_id: "automatic-debit:" + debit.id + ":" + monthStart.slice(0, 7),
     excluded_from_budget: false,
     needs_review: false,
   }));
@@ -115,14 +162,15 @@ async function generateAutomaticDebits(supabase: ReturnType<typeof createClient>
 }
 
 async function saveSyncStatus(
-  supabase: ReturnType<typeof createClient>,
+  supabase: ReturnType<typeof createAdminClient>,
+  userId: string,
   status: "success" | "error",
   importedCount: number,
   skippedCount: number,
   message: string,
 ) {
   const { error } = await supabase.from("mercadopago_sync_status").upsert({
-    user_id: SYNC_USER_ID,
+    user_id: userId,
     last_checked_at: new Date().toISOString(),
     last_status: status,
     imported_count: importedCount,
@@ -133,31 +181,82 @@ async function saveSyncStatus(
   if (error) throw error;
 }
 
-let statusClient: ReturnType<typeof createClient> | null = null;
+async function configureDailyReport(accessToken: string) {
+  const authorization = { Authorization: "Bearer " + accessToken };
+  const configUrl = "https://api.mercadopago.com/v1/account/settlement_report/config";
+  let configResponse = await fetch(configUrl, { headers: authorization });
+  let configuration: { scheduled?: boolean } | null = null;
 
-Deno.serve(async () => {
+  if (configResponse.status === 404) {
+    configResponse = await fetch(configUrl, {
+      method: "POST",
+      headers: { ...authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file_name_prefix: "gastos-mp",
+        display_timezone: "GMT-03",
+        separator: ";",
+        header_language: "es",
+        frequency: { type: "daily", hour: 6 },
+        columns: [
+          { key: "TRANSACTION_DATE" },
+          { key: "TRANSACTION_TYPE" },
+          { key: "TRANSACTION_AMOUNT" },
+          { key: "SETTLEMENT_NET_AMOUNT" },
+          { key: "SOURCE_ID" },
+          { key: "EXTERNAL_REFERENCE" },
+          { key: "DESCRIPTION" },
+        ],
+      }),
+    });
+    if (!configResponse.ok) {
+      throw new Error("Mercado Pago no permitió configurar el reporte. Revisá el Access Token y sus permisos.");
+    }
+    configuration = await configResponse.json();
+  } else if (!configResponse.ok) {
+    if (configResponse.status === 401 || configResponse.status === 403) {
+      throw new Error("Mercado Pago rechazó el Access Token. Revisá que sea de la cuenta correcta y tenga permisos.");
+    }
+    throw new Error("No se pudo consultar la configuración del reporte de Mercado Pago.");
+  } else {
+    configuration = await configResponse.json();
+  }
+
+  if (!configuration?.scheduled) {
+    const scheduleResponse = await fetch(
+      "https://api.mercadopago.com/v1/account/settlement_report/schedule",
+      { method: "POST", headers: authorization },
+    );
+    if (!scheduleResponse.ok) {
+      throw new Error("Mercado Pago no permitió activar el reporte diario.");
+    }
+  }
+}
+
+async function syncUserReport(
+  supabase: ReturnType<typeof createAdminClient>,
+  userId: string,
+  accessToken: string,
+) {
   try {
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      db: { schema: "gastos" },
-    });
-    statusClient = supabase;
-
-    const automaticDebitCount = await generateAutomaticDebits(supabase);
-
-    const listRes = await fetch("https://api.mercadopago.com/v1/account/settlement_report/list", {
-      headers: { Authorization: `Bearer ${MP_TOKEN}` },
-    });
-    if (!listRes.ok) {
-      throw new Error(`Error al listar reportes de Mercado Pago: ${listRes.status}`);
+    const listResponse = await fetch(
+      "https://api.mercadopago.com/v1/account/settlement_report/list",
+      { headers: { Authorization: "Bearer " + accessToken } },
+    );
+    if (!listResponse.ok) {
+      if (listResponse.status === 401 || listResponse.status === 403) {
+        throw new Error("Mercado Pago rechazó el Access Token o sus permisos.");
+      }
+      throw new Error("No se pudieron consultar los reportes de Mercado Pago.");
     }
 
-    const reports = await listRes.json();
+    const reports = await listResponse.json();
     const readyReports = Array.isArray(reports)
       ? reports.filter((report) => report.status === "processed" && report.file_name)
       : [];
     if (readyReports.length === 0) {
-      await saveSyncStatus(supabase, "success", 0, 0, "Todavía no hay reportes procesados de Mercado Pago.");
-      return new Response(`Débitos automáticos agregados: ${automaticDebitCount}. Todavía no hay reportes procesados de Mercado Pago.`, { status: 200 });
+      const message = "Todavía no hay reportes procesados de Mercado Pago.";
+      await saveSyncStatus(supabase, userId, "success", 0, 0, message);
+      return { importedCount: 0, skippedCount: 0, message };
     }
 
     readyReports.sort(
@@ -165,27 +264,27 @@ Deno.serve(async () => {
         - new Date(a.date_created || a.generation_date).getTime(),
     );
     const latest = readyReports[0];
-
+    const stateId = "mercadopago:" + userId;
     const { data: state, error: stateError } = await supabase
       .from("sync_state")
       .select("last_file_name")
-      .eq("id", "mercadopago")
+      .eq("id", stateId)
       .maybeSingle();
     if (stateError) throw stateError;
+
     if (state?.last_file_name === latest.file_name) {
-      await saveSyncStatus(supabase, "success", 0, 0, "El reporte más reciente ya estaba sincronizado; no hay movimientos nuevos.");
-      return new Response(`Débitos automáticos agregados: ${automaticDebitCount}. Nada nuevo de Mercado Pago para sincronizar.`, { status: 200 });
+      const message = "El reporte más reciente ya estaba sincronizado; no hay movimientos nuevos.";
+      await saveSyncStatus(supabase, userId, "success", 0, 0, message);
+      return { importedCount: 0, skippedCount: 0, message };
     }
 
-    const fileRes = await fetch(
-      `https://api.mercadopago.com/v1/account/settlement_report/${encodeURIComponent(latest.file_name)}`,
-      { headers: { Authorization: `Bearer ${MP_TOKEN}` } },
+    const fileResponse = await fetch(
+      "https://api.mercadopago.com/v1/account/settlement_report/" + encodeURIComponent(latest.file_name),
+      { headers: { Authorization: "Bearer " + accessToken } },
     );
-    if (!fileRes.ok) {
-      throw new Error(`Error al descargar el reporte: ${fileRes.status}`);
-    }
+    if (!fileResponse.ok) throw new Error("No se pudo descargar el reporte de Mercado Pago.");
 
-    const { headers, rows } = parseCsv(await fileRes.text());
+    const { headers, rows } = parseCsv(await fileResponse.text());
     const indexOf = (name: string) => headers.indexOf(name);
     const dateIndex = indexOf("TRANSACTION_DATE") >= 0 ? indexOf("TRANSACTION_DATE") : indexOf("RELEASE_DATE");
     const typeIndex = indexOf("TRANSACTION_TYPE");
@@ -199,28 +298,28 @@ Deno.serve(async () => {
       .filter((index) => index >= 0);
 
     if (dateIndex < 0 || amountIndexes.length === 0) {
-      throw new Error(`Faltan columnas de fecha o monto. Columnas disponibles: ${headers.join(", ")}`);
+      throw new Error("El reporte no tiene columnas de fecha o importe reconocidas.");
     }
 
     const { data: userRules, error: rulesError } = await supabase
       .from("category_rules")
       .select("keyword, category_id")
-      .eq("user_id", SYNC_USER_ID);
+      .eq("user_id", userId);
     if (rulesError) throw rulesError;
 
-    let { data: fallbackCat, error: categoryError } = await supabase
+    let { data: fallbackCategory, error: categoryError } = await supabase
       .from("categories")
       .select("id")
-      .eq("user_id", SYNC_USER_ID)
+      .eq("user_id", userId)
       .eq("name", "Sin categorizar")
       .maybeSingle();
     if (categoryError) throw categoryError;
 
-    if (!fallbackCat) {
+    if (!fallbackCategory) {
       const { data: created, error } = await supabase
         .from("categories")
         .insert({
-          user_id: SYNC_USER_ID,
+          user_id: userId,
           name: "Sin categorizar",
           icon: "",
           color: "#9B9B94",
@@ -229,34 +328,36 @@ Deno.serve(async () => {
         .select("id")
         .single();
       if (error) throw error;
-      fallbackCat = created;
+      fallbackCategory = created;
     }
 
     const seen: Record<string, number> = {};
-    const inserts = rows.flatMap((cols) => {
-      const rawAmount = amountIndexes.map((index) => parseAmount(cols[index])).find((value) => value !== null);
-      const date = parseDate(cols[dateIndex]);
-      if (rawAmount == null || rawAmount >= 0 || !date) return [];
+    const inserts = rows.flatMap((columns) => {
+      const amount = amountIndexes
+        .map((index) => parseAmount(columns[index]))
+        .find((value) => value !== null);
+      const date = parseDate(columns[dateIndex]);
+      if (amount == null || amount >= 0 || !date) return [];
 
-      const type = typeIndex >= 0 ? (cols[typeIndex] || "").trim() : "";
-      const description = ((descriptionIndex >= 0 && cols[descriptionIndex]) || type || "Movimiento Mercado Pago")
+      const type = typeIndex >= 0 ? (columns[typeIndex] || "").trim() : "";
+      const description = ((descriptionIndex >= 0 && columns[descriptionIndex]) || type || "Movimiento Mercado Pago")
         .trim()
         .replace(/\s+/g, " ");
-      const sourceId = sourceIndex >= 0 ? (cols[sourceIndex] || "").trim() : "";
-      const reference = referenceIndex >= 0 ? (cols[referenceIndex] || "").trim() : "";
+      const sourceId = sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "";
+      const reference = referenceIndex >= 0 ? (columns[referenceIndex] || "").trim() : "";
       const identity = sourceId || reference || description;
-      const baseId = `${identity}|${type}|${date}|${rawAmount.toFixed(2)}`;
+      const baseId = identity + "|" + type + "|" + date + "|" + amount.toFixed(2);
       seen[baseId] = (seen[baseId] || 0) + 1;
-      const externalId = seen[baseId] > 1 ? `${baseId}#${seen[baseId]}` : baseId;
-
+      const externalId = seen[baseId] > 1 ? baseId + "#" + seen[baseId] : baseId;
       const found = (userRules || []).find((rule) =>
         rule.keyword && description.toLowerCase().includes(rule.keyword.toLowerCase())
       );
+
       return [{
-        user_id: SYNC_USER_ID,
-        category_id: found?.category_id || fallbackCat!.id,
+        user_id: userId,
+        category_id: found?.category_id || fallbackCategory!.id,
         description,
-        amount: Math.abs(rawAmount),
+        amount: Math.abs(amount),
         date,
         source: "mercadopago",
         external_id: externalId,
@@ -274,29 +375,180 @@ Deno.serve(async () => {
       importedCount = importedRows?.length || 0;
     }
 
-    const { error: syncError } = await supabase.from("sync_state").upsert({
-      id: "mercadopago",
+    const { error: stateSaveError } = await supabase.from("sync_state").upsert({
+      id: stateId,
       last_file_name: latest.file_name,
       synced_at: new Date().toISOString(),
     });
-    if (syncError) throw syncError;
+    if (stateSaveError) throw stateSaveError;
 
     const skippedCount = Math.max(inserts.length - importedCount, 0);
     const message = importedCount > 0
       ? "Se procesó el último reporte disponible."
       : "Se revisó el reporte, pero no había movimientos nuevos.";
-    await saveSyncStatus(supabase, "success", importedCount, skippedCount, message);
-
-    return new Response(`Listo: ${importedCount} gastos de Mercado Pago y ${automaticDebitCount} débitos automáticos agregados; ${skippedCount} duplicados omitidos.`, { status: 200 });
-  } catch (err) {
-    console.error("sync-mercadopago:", err);
-    if (statusClient) {
-      try {
-        await saveSyncStatus(statusClient, "error", 0, 0, "No se pudo completar la consulta a Mercado Pago.");
-      } catch (statusError) {
-        console.error("sync-mercadopago status:", statusError);
-      }
+    await saveSyncStatus(supabase, userId, "success", importedCount, skippedCount, message);
+    return { importedCount, skippedCount, message };
+  } catch (error) {
+    console.error("Error al sincronizar la cuenta de Mercado Pago", userId, error);
+    try {
+      await saveSyncStatus(
+        supabase,
+        userId,
+        "error",
+        0,
+        0,
+        "No se pudo completar la consulta a Mercado Pago. Revisá el Access Token y la configuración del reporte.",
+      );
+    } catch (statusError) {
+      console.error("No se pudo guardar el estado de sincronización", userId, statusError);
     }
-    return new Response("Error al sincronizar el reporte de Mercado Pago.", { status: 500 });
+    throw error;
+  }
+}
+
+async function getUserConnection(
+  supabase: ReturnType<typeof createAdminClient>,
+  userId: string,
+) {
+  const { data: connection, error } = await supabase
+    .from("mercadopago_credentials")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  return Boolean(connection || (LEGACY_MP_TOKEN && LEGACY_USER_ID === userId));
+}
+
+async function handleUserRequest(request: Request, supabase: ReturnType<typeof createAdminClient>, userId: string) {
+  let body: { action?: string; accessToken?: string } = {};
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "La solicitud no tiene un formato válido." }, 400);
+  }
+
+  if (body.action === "status") {
+    const [{ data: connection, error: connectionError }, { data: syncStatus, error: statusError }] = await Promise.all([
+      supabase
+        .from("mercadopago_credentials")
+        .select("user_id")
+        .eq("user_id", userId)
+        .maybeSingle(),
+      supabase
+        .from("mercadopago_sync_status")
+        .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
+        .eq("user_id", userId)
+        .maybeSingle(),
+    ]);
+    if (connectionError || statusError) {
+      console.error("No se pudo consultar la conexión de Mercado Pago", userId, connectionError || statusError);
+      return jsonResponse({ error: "No se pudo consultar la conexión." }, 500);
+    }
+    return jsonResponse({
+      connected: Boolean(connection || (LEGACY_MP_TOKEN && LEGACY_USER_ID === userId)),
+      syncStatus: syncStatus || null,
+    });
+  }
+
+  if (body.action === "connect") {
+    const accessToken = body.accessToken?.trim();
+    if (!accessToken || accessToken.length > 4096) {
+      return jsonResponse({ error: "Pegá un Access Token válido de Mercado Pago." }, 400);
+    }
+
+    try {
+      await configureDailyReport(accessToken);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo validar el Access Token.";
+      return jsonResponse({ error: message }, 400);
+    }
+
+    const { error: saveError } = await supabase.from("mercadopago_credentials").upsert({
+      user_id: userId,
+      access_token: accessToken,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    if (saveError) {
+      console.error("No se pudo guardar el Access Token de Mercado Pago", userId, saveError);
+      return jsonResponse({ error: "No se pudo guardar el token en forma segura." }, 500);
+    }
+
+    let message = "Mercado Pago quedó conectado y el reporte diario está activo.";
+    try {
+      await syncUserReport(supabase, userId, accessToken);
+    } catch {
+      message += " La primera consulta no se completó; la app volverá a intentar en la próxima actualización.";
+    }
+    const { data: syncStatus } = await supabase
+      .from("mercadopago_sync_status")
+      .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    return jsonResponse({ connected: true, message, syncStatus: syncStatus || null });
+  }
+
+  return jsonResponse({ error: "Acción no reconocida." }, 400);
+}
+
+async function runScheduledSync(supabase: ReturnType<typeof createAdminClient>) {
+  const automaticDebitCount = await generateAutomaticDebits(supabase);
+  const { data: storedConnections, error } = await supabase
+    .from("mercadopago_credentials")
+    .select("user_id, access_token");
+  if (error) throw error;
+
+  const connections = new Map<string, string>(
+    (storedConnections || []).map((connection) => [connection.user_id, connection.access_token]),
+  );
+  if (LEGACY_MP_TOKEN && LEGACY_USER_ID && !connections.has(LEGACY_USER_ID)) {
+    connections.set(LEGACY_USER_ID, LEGACY_MP_TOKEN);
+  }
+
+  let importedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  for (const [userId, accessToken] of connections.entries()) {
+    try {
+      const result = await syncUserReport(supabase, userId, accessToken);
+      importedCount += result.importedCount;
+      skippedCount += result.skippedCount;
+    } catch {
+      failedCount += 1;
+    }
+  }
+
+  return jsonResponse({
+    syncedAccounts: connections.size,
+    importedCount,
+    skippedCount,
+    failedCount,
+    automaticDebitCount,
+  });
+}
+
+Deno.serve(async (request: Request) => {
+  if (request.method === "OPTIONS") {
+    return new Response("ok", { headers: CORS_HEADERS });
+  }
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "Método no permitido." }, 405);
+  }
+
+  try {
+    const authorization = request.headers.get("Authorization") || "";
+    const token = authorization.replace(/^Bearer\s+/i, "");
+    if (!token) return jsonResponse({ error: "Iniciá sesión para continuar." }, 401);
+
+    const supabase = createAdminClient();
+    if (getJwtRole(token) === "service_role") {
+      return await runScheduledSync(supabase);
+    }
+
+    const user = await getAuthenticatedUser(token);
+    return await handleUserRequest(request, supabase, user.id);
+  } catch (error) {
+    console.error("sync-mercadopago:", error);
+    return jsonResponse({ error: "No se pudo completar la operación de Mercado Pago." }, 500);
   }
 });
