@@ -1,6 +1,6 @@
 # Panel de Gastos
 
-App web para controlar tus gastos, pensada para vos como único usuario.
+App web para controlar gastos con cuentas independientes para cada usuario.
 Next.js (App Router) + Supabase (base de datos + login) + Vercel (hosting).
 
 No incluye seguimiento de ingresos/sueldo a propósito: la app solo registra
@@ -15,14 +15,12 @@ y organiza gastos.
    Esto crea el esquema `gastos` con las tablas `categories`, `transactions`,
    `category_rules` y `sync_state`, y las políticas de seguridad (RLS) para
    que solo vos puedas ver y modificar tus datos.
-3. Andá a **Authentication > Providers > Email** y desactivá
-   "Allow new users to sign up". Así nadie más se puede registrar en tu app.
-   (Si ya usás ese proyecto para la cursada y ahí sí necesitás que la gente
-   se registre, podés saltear este paso — igual nadie va a poder entrar a
-   *esta* app sin que le crees el usuario vos, porque el login solo lee
-   contra Supabase Auth y vos sos el único con datos en el esquema `gastos`.)
-4. Andá a **Authentication > Users > Add user** y create tu propio usuario
-   (email + contraseña), si todavía no tenés uno en ese proyecto.
+3. Para permitir que otras personas creen cuentas desde la app, andá a
+   **Authentication > Providers > Email** y habilitá **Allow new users to sign up**.
+   Mantené la confirmación por correo activada.
+4. En **Authentication > URL Configuration**, configurá la URL pública de la app
+   como **Site URL** y agregá a **Redirect URLs** `https://TU-DOMINIO/auth/callback`
+   (y `http://localhost:3000/auth/callback` para desarrollo).
 5. Andá a **Settings > API** y copiá:
    - **Project URL**
    - La clave **anon / public** (puede aparecer como "anon key" o
@@ -78,8 +76,9 @@ GitHub con "Add file > Upload files" si preferís no usar la terminal para esto)
    `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`).
 4. Deploy. En un par de minutos tenés la URL pública de tu app.
 
-Como el login está protegido por Supabase Auth y los signups están
-desactivados, aunque la URL sea pública nadie más va a poder entrar.
+Cada persona crea su cuenta desde la pantalla de inicio de sesión. Las tablas
+de gastos filtran por el usuario autenticado, así que cada cuenta mantiene sus
+movimientos, categorías y límites separados.
 
 ## Sobre el botón "+"
 
@@ -98,52 +97,18 @@ para que después puedas distinguir lo que cargaste vos de lo que entró solo.
 2. "Tus integraciones" > "Crear aplicación". Elegí cualquier nombre
    (ej. "Panel de gastos"), y como tipo de integración "Pagos online".
 3. Entrá a la aplicación creada > "Credenciales de producción" y copiá el
-   **Access Token**. Guardalo, lo vas a necesitar en el paso 5.
+   **Access Token**. Lo vas a pegar en Configuración > Mercado Pago.
 
-### 2. Configurar el reporte "Todas las transacciones" (una sola vez)
+### 2. Activar el reporte diario
 
-Con `curl` (o Postman), reemplazando `TU_ACCESS_TOKEN`:
+No hace falta configurarlo con comandos. Al guardar el Access Token en
+**Configuración > Mercado Pago**, la app valida el token y activa el reporte
+diario si todavía no existe. Mercado Pago puede tardar un tiempo en generar el
+primer archivo; la app lo buscará automáticamente en la siguiente ejecución.
 
-```bash
-curl -X POST \
-  -H 'accept: application/json' \
-  -H 'content-type: application/json' \
-  -H 'Authorization: Bearer TU_ACCESS_TOKEN' \
-  'https://api.mercadopago.com/v1/account/settlement_report/config' \
-  -d '{
-    "file_name_prefix": "gastos-mp",
-    "display_timezone": "GMT-03",
-    "separator": ";",
-    "header_language": "es",
-    "frequency": { "type": "daily", "hour": 6 },
-    "columns": [
-      { "key": "TRANSACTION_DATE" },
-      { "key": "TRANSACTION_TYPE" },
-      { "key": "TRANSACTION_AMOUNT" },
-      { "key": "SETTLEMENT_NET_AMOUNT" },
-      { "key": "SOURCE_ID" },
-      { "key": "EXTERNAL_REFERENCE" },
-      { "key": "DESCRIPTION" }
-    ]
-  }'
-```
-
-Después activá la generación automática diaria:
-
-```bash
-curl -X POST \
-  -H 'Authorization: Bearer TU_ACCESS_TOKEN' \
-  'https://api.mercadopago.com/v1/account/settlement_report/schedule'
-```
-
-Desde ahora, Mercado Pago va a generar solo, todos los días, un reporte con
-tus movimientos. Podés ver el primero generándose en el panel de Mercado
-Pago, en "Tu negocio > Reportes", para confirmar que quedó bien configurado.
-
-La función está preparada para el CSV con las columnas configuradas arriba.
 La sincronización usa `SETTLEMENT_NET_AMOUNT` (impacto neto en la cuenta) y
-solo carga las filas con monto negativo. Para reconocer un movimiento entre
-reportes y evitar duplicados usa `SOURCE_ID`, el tipo, la fecha y el monto.
+solo carga las filas con monto negativo. Para reconocer movimientos repetidos
+usa `SOURCE_ID`, el tipo, la fecha y el monto.
 
 ### 3. Instalar el Supabase CLI y conectarlo a tu proyecto
 
@@ -158,22 +123,25 @@ supabase link --project-ref TU_PROJECT_REF
 
 ### 4. Aplicar las migraciones a una base existente
 
-En el **SQL Editor** de Supabase ejecutá una vez el contenido de cada archivo:
+En el **SQL Editor** de Supabase ejecutá una vez el contenido de cada archivo
+que todavía no hayas aplicado:
 `supabase/add_external_id.sql`, `supabase/add_settings.sql`,
-`supabase/add_excluded_from_budget.sql` y
-`supabase/add_review_and_card_installments.sql`. Agregan los identificadores
-para evitar duplicados, el límite mensual, la exclusión de gastos del negocio,
-la bandeja de revisión y los datos de cuotas de tarjeta.
+`supabase/add_excluded_from_budget.sql`,
+`supabase/add_review_and_card_installments.sql`,
+`supabase/add_mercadopago_sync_status.sql` y la nueva migración
+`supabase/migrations/20261014160000_user_mp_credentials.sql`. Esta última
+crea el almacén privado de Access Tokens y los permisos del estado de sincronización.
 
-### 5. Guardar tus credenciales como secrets de la función
+### 5. Conectar Mercado Pago desde la app
 
-```bash
-supabase secrets set MP_ACCESS_TOKEN=tu_access_token_de_mercado_pago
-supabase secrets set MP_SYNC_USER_ID=tu_user_id_de_supabase
-```
+Cada usuario abre **Configuración > Mercado Pago** y pega el Access Token de su
+propia cuenta. La app guarda el token del lado del servidor, configura el
+reporte diario si todavía no existe y sincroniza los movimientos de esa cuenta.
+No se necesita Client ID ni Client Secret para esta conexión con Access Token.
 
-Tu `MP_SYNC_USER_ID` es el UID de tu usuario: lo encontrás en
-**Authentication > Users** dentro del panel de Supabase.
+La función mantiene compatibilidad con `MP_ACCESS_TOKEN` y `MP_SYNC_USER_ID`
+existentes hasta que el usuario conecte su token desde Configuración. Después
+de migrarlo, se pueden quitar esos dos secrets del proyecto Supabase.
 
 ### 6. Deployar la función
 
