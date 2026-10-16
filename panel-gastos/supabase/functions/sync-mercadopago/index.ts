@@ -249,57 +249,28 @@ async function syncUserReport(
       throw new Error("No se pudieron consultar los reportes de Mercado Pago.");
     }
 
-    const reports = await listResponse.json();
-    const readyReports = Array.isArray(reports)
-      ? reports.filter((report) => report.status === "processed" && report.file_name)
-      : [];
+    const reportList = await listResponse.json();
+    const reports = Array.isArray(reportList) ? reportList : [];
+    const readyReports = reports.filter((report) => report.status === "processed" && report.file_name);
+    const pendingReports = reports.some((report) => {
+      const status = String(report.status || "").toLowerCase();
+      return report.file_name && !["processed", "error", "failed"].includes(status);
+    });
+
     if (readyReports.length === 0) {
-      const message = "Todavía no hay reportes procesados de Mercado Pago.";
+      const message = pendingReports
+        ? "Mercado Pago todavía está procesando el reporte. Se volverá a consultar automáticamente."
+        : "Mercado Pago todavía no generó un reporte disponible para esta cuenta. Se volverá a consultar automáticamente.";
       await saveSyncStatus(supabase, userId, "success", 0, 0, message);
       return { importedCount: 0, skippedCount: 0, message };
     }
 
+    // Revisa todos los reportes procesados, no solo el más reciente. MP puede
+    // terminar reportes con demora; el índice único por usuario evita duplicados.
     readyReports.sort(
-      (a, b) => new Date(b.date_created || b.generation_date).getTime()
-        - new Date(a.date_created || a.generation_date).getTime(),
+      (a, b) => new Date(a.date_created || a.generation_date).getTime()
+        - new Date(b.date_created || b.generation_date).getTime(),
     );
-    const latest = readyReports[0];
-    const stateId = "mercadopago:" + userId;
-    const { data: state, error: stateError } = await supabase
-      .from("sync_state")
-      .select("last_file_name")
-      .eq("id", stateId)
-      .maybeSingle();
-    if (stateError) throw stateError;
-
-    if (state?.last_file_name === latest.file_name) {
-      const message = "El reporte más reciente ya estaba sincronizado; no hay movimientos nuevos.";
-      await saveSyncStatus(supabase, userId, "success", 0, 0, message);
-      return { importedCount: 0, skippedCount: 0, message };
-    }
-
-    const fileResponse = await fetch(
-      "https://api.mercadopago.com/v1/account/settlement_report/" + encodeURIComponent(latest.file_name),
-      { headers: { Authorization: "Bearer " + accessToken } },
-    );
-    if (!fileResponse.ok) throw new Error("No se pudo descargar el reporte de Mercado Pago.");
-
-    const { headers, rows } = parseCsv(await fileResponse.text());
-    const indexOf = (name: string) => headers.indexOf(name);
-    const dateIndex = indexOf("TRANSACTION_DATE") >= 0 ? indexOf("TRANSACTION_DATE") : indexOf("RELEASE_DATE");
-    const typeIndex = indexOf("TRANSACTION_TYPE");
-    const descriptionIndex = indexOf("DESCRIPTION");
-    const sourceIndex = indexOf("SOURCE_ID");
-    const referenceIndex = indexOf("EXTERNAL_REFERENCE") >= 0
-      ? indexOf("EXTERNAL_REFERENCE")
-      : indexOf("REFERENCE_ID");
-    const amountIndexes = ["SETTLEMENT_NET_AMOUNT", "TRANSACTION_NET_AMOUNT", "TRANSACTION_AMOUNT"]
-      .map(indexOf)
-      .filter((index) => index >= 0);
-
-    if (dateIndex < 0 || amountIndexes.length === 0) {
-      throw new Error("El reporte no tiene columnas de fecha o importe reconocidas.");
-    }
 
     const { data: userRules, error: rulesError } = await supabase
       .from("category_rules")
@@ -331,61 +302,91 @@ async function syncUserReport(
       fallbackCategory = created;
     }
 
-    const seen: Record<string, number> = {};
-    const inserts = rows.flatMap((columns) => {
-      const amount = amountIndexes
-        .map((index) => parseAmount(columns[index]))
-        .find((value) => value !== null);
-      const date = parseDate(columns[dateIndex]);
-      if (amount == null || amount >= 0 || !date) return [];
-
-      const type = typeIndex >= 0 ? (columns[typeIndex] || "").trim() : "";
-      const description = ((descriptionIndex >= 0 && columns[descriptionIndex]) || type || "Movimiento Mercado Pago")
-        .trim()
-        .replace(/\s+/g, " ");
-      const sourceId = sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "";
-      const reference = referenceIndex >= 0 ? (columns[referenceIndex] || "").trim() : "";
-      const identity = sourceId || reference || description;
-      const baseId = identity + "|" + type + "|" + date + "|" + amount.toFixed(2);
-      seen[baseId] = (seen[baseId] || 0) + 1;
-      const externalId = seen[baseId] > 1 ? baseId + "#" + seen[baseId] : baseId;
-      const found = (userRules || []).find((rule) =>
-        rule.keyword && description.toLowerCase().includes(rule.keyword.toLowerCase())
-      );
-
-      return [{
-        user_id: userId,
-        category_id: found?.category_id || fallbackCategory!.id,
-        description,
-        amount: Math.abs(amount),
-        date,
-        source: "mercadopago",
-        external_id: externalId,
-        needs_review: !found,
-      }];
-    });
-
     let importedCount = 0;
-    if (inserts.length > 0) {
-      const { data: importedRows, error } = await supabase
-        .from("transactions")
-        .upsert(inserts, { onConflict: "user_id,external_id", ignoreDuplicates: true })
-        .select("id");
-      if (error) throw error;
-      importedCount = importedRows?.length || 0;
+    let skippedCount = 0;
+
+    for (const report of readyReports) {
+      const fileResponse = await fetch(
+        "https://api.mercadopago.com/v1/account/settlement_report/" + encodeURIComponent(report.file_name),
+        { headers: { Authorization: "Bearer " + accessToken } },
+      );
+      if (!fileResponse.ok) throw new Error("No se pudo descargar uno de los reportes de Mercado Pago.");
+
+      const { headers, rows } = parseCsv(await fileResponse.text());
+      const indexOf = (name: string) => headers.indexOf(name);
+      const dateIndex = indexOf("TRANSACTION_DATE") >= 0 ? indexOf("TRANSACTION_DATE") : indexOf("RELEASE_DATE");
+      const typeIndex = indexOf("TRANSACTION_TYPE");
+      const descriptionIndex = indexOf("DESCRIPTION");
+      const sourceIndex = indexOf("SOURCE_ID");
+      const referenceIndex = indexOf("EXTERNAL_REFERENCE") >= 0
+        ? indexOf("EXTERNAL_REFERENCE")
+        : indexOf("REFERENCE_ID");
+      const amountIndexes = ["SETTLEMENT_NET_AMOUNT", "TRANSACTION_NET_AMOUNT", "TRANSACTION_AMOUNT"]
+        .map(indexOf)
+        .filter((index) => index >= 0);
+
+      if (dateIndex < 0 || amountIndexes.length === 0) {
+        throw new Error("El reporte no tiene columnas de fecha o importe reconocidas.");
+      }
+
+      const seen: Record<string, number> = {};
+      const inserts = rows.flatMap((columns) => {
+        const amount = amountIndexes
+          .map((index) => parseAmount(columns[index]))
+          .find((value) => value !== null);
+        const date = parseDate(columns[dateIndex]);
+        if (amount == null || amount >= 0 || !date) return [];
+
+        const type = typeIndex >= 0 ? (columns[typeIndex] || "").trim() : "";
+        const description = ((descriptionIndex >= 0 && columns[descriptionIndex]) || type || "Movimiento Mercado Pago")
+          .trim()
+          .replace(/\s+/g, " ");
+        const sourceId = sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "";
+        const reference = referenceIndex >= 0 ? (columns[referenceIndex] || "").trim() : "";
+        const identity = sourceId || reference || description;
+        const baseId = identity + "|" + type + "|" + date + "|" + amount.toFixed(2);
+        seen[baseId] = (seen[baseId] || 0) + 1;
+        const externalId = seen[baseId] > 1 ? baseId + "#" + seen[baseId] : baseId;
+        const found = (userRules || []).find((rule) =>
+          rule.keyword && description.toLowerCase().includes(rule.keyword.toLowerCase())
+        );
+
+        return [{
+          user_id: userId,
+          category_id: found?.category_id || fallbackCategory!.id,
+          description,
+          amount: Math.abs(amount),
+          date,
+          source: "mercadopago",
+          external_id: externalId,
+          needs_review: !found,
+        }];
+      });
+
+      let importedFromReport = 0;
+      if (inserts.length > 0) {
+        const { data: importedRows, error } = await supabase
+          .from("transactions")
+          .upsert(inserts, { onConflict: "user_id,external_id", ignoreDuplicates: true })
+          .select("id");
+        if (error) throw error;
+        importedFromReport = importedRows?.length || 0;
+      }
+      importedCount += importedFromReport;
+      skippedCount += Math.max(inserts.length - importedFromReport, 0);
     }
 
+    const latest = readyReports[readyReports.length - 1];
     const { error: stateSaveError } = await supabase.from("sync_state").upsert({
-      id: stateId,
+      id: "mercadopago:" + userId,
       last_file_name: latest.file_name,
       synced_at: new Date().toISOString(),
     });
     if (stateSaveError) throw stateSaveError;
 
-    const skippedCount = Math.max(inserts.length - importedCount, 0);
     const message = importedCount > 0
-      ? "Se procesó el último reporte disponible."
-      : "Se revisó el reporte, pero no había movimientos nuevos.";
+      ? "Se procesaron " + readyReports.length + " reportes disponibles y se importaron " + importedCount + " gastos."
+      : "Se revisaron " + readyReports.length + " reportes procesados; no había movimientos nuevos.";
     await saveSyncStatus(supabase, userId, "success", importedCount, skippedCount, message);
     return { importedCount, skippedCount, message };
   } catch (error) {
@@ -405,7 +406,6 @@ async function syncUserReport(
     throw error;
   }
 }
-
 async function getUserConnection(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
@@ -509,6 +509,28 @@ async function runScheduledSync(supabase: ReturnType<typeof createAdminClient>) 
   let skippedCount = 0;
   let failedCount = 0;
   for (const [userId, accessToken] of connections.entries()) {
+    try {
+      // Revalida la programación de cada cuenta para recuperar una que haya
+      // quedado desactivada o no se haya terminado de activar en Mercado Pago.
+      await configureDailyReport(accessToken);
+    } catch (error) {
+      failedCount += 1;
+      console.error("No se pudo verificar el reporte diario de Mercado Pago", userId, error);
+      try {
+        await saveSyncStatus(
+          supabase,
+          userId,
+          "error",
+          0,
+          0,
+          "No se pudo verificar la programación diaria de Mercado Pago. Revisá el Access Token y los permisos.",
+        );
+      } catch (statusError) {
+        console.error("No se pudo guardar el estado de sincronización", userId, statusError);
+      }
+      continue;
+    }
+
     try {
       const result = await syncUserReport(supabase, userId, accessToken);
       importedCount += result.importedCount;
