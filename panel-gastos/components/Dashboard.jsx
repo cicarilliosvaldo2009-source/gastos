@@ -1728,7 +1728,11 @@ export default function Dashboard() {
                             ? "Descarga prevista a partir de " + fmtDateTime(manualSyncJob.ready_at)
                             : manualSyncJob.status === "processing"
                             ? "Mercado Pago está procesando la descarga."
-                            : manualSyncJob.last_message || ""}
+                            : <>{manualSyncJob.last_message || ""}
+                              {manualSyncJob.begin_date && manualSyncJob.end_date
+                                ? " · Período solicitado: " + fmtDateTime(manualSyncJob.begin_date) + " a " + fmtDateTime(manualSyncJob.end_date)
+                                : ""}
+                            </>}
                       </span>
                     )}
                   </div>
@@ -1748,8 +1752,10 @@ export default function Dashboard() {
                       <span className="et-sync-meta">{fmtDateTime(mpSyncStatus.last_checked_at)}</span>
                       {mpSyncStatus.last_status === "success" && (
                         <span className="et-sync-counts">
-                          {mpSyncStatus.imported_count > 0 ? mpSyncStatus.imported_count + " agregados" : "Sin movimientos nuevos"}
-                          {mpSyncStatus.skipped_count > 0 ? " · " + mpSyncStatus.skipped_count + " duplicados omitidos" : ""}
+                          {mpSyncStatus.imported_count > 0 || mpSyncStatus.skipped_count > 0
+                            ? mpSyncStatus.imported_count + (mpSyncStatus.imported_count === 1 ? " nuevo" : " nuevos")
+                              + (mpSyncStatus.skipped_count > 0 ? " · " + mpSyncStatus.skipped_count + " ya cargados" : "")
+                            : "Sin movimientos nuevos"}
                         </span>
                       )}
                       {mpSyncStatus.last_message && <span className="et-sync-message">{mpSyncStatus.last_message}</span>}
