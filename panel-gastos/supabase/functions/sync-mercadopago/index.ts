@@ -775,6 +775,14 @@ async function requestManualSync(
     return jsonResponse({ error: "Conectá Mercado Pago antes de sincronizar." }, 400);
   }
 
+  // Inicia también el reporte de retiros al presionar "Sincronizar ya",
+  // para que Mercado Pago pueda procesarlo durante la espera de 10 minutos.
+  try {
+    await syncWithdrawActivityReport(supabase, userId, accessToken);
+  } catch (activityError) {
+    console.error("No se pudo iniciar el reporte de contraparte", userId, activityError);
+  }
+
   const beginDate = previousArgentinaDayStartUtc();
   const endDate = new Date().toISOString();
   const requestedAt = new Date().toISOString();
