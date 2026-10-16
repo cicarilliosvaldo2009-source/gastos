@@ -1753,7 +1753,7 @@ export default function Dashboard() {
                       {mpSyncStatus.last_status === "success" && (
                         <span className="et-sync-counts">
                           {mpSyncStatus.imported_count > 0 || mpSyncStatus.skipped_count > 0
-                            ? mpSyncStatus.imported_count + " nuevos"
+                            ? mpSyncStatus.imported_count + (mpSyncStatus.imported_count === 1 ? " nuevo" : " nuevos")
                               + (mpSyncStatus.skipped_count > 0 ? " · " + mpSyncStatus.skipped_count + " ya cargados" : "")
                             : "Sin movimientos nuevos"}
                         </span>
