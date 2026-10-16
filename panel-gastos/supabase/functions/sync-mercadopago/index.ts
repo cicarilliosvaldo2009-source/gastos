@@ -746,7 +746,7 @@ async function requestManualSync(
 ) {
   const { data: existingJob, error: existingError } = await supabase
     .from("mercadopago_manual_sync_jobs")
-    .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+    .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message,begin_date,end_date")
     .eq("user_id", userId)
     .in("status", ["requesting", "pending", "processing"])
     .order("requested_at", { ascending: false })
@@ -796,14 +796,14 @@ async function requestManualSync(
       end_date: endDate,
       last_message: "Solicitando el reporte a Mercado Pago.",
     })
-    .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+    .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message,begin_date,end_date")
     .single();
 
   if (insertError) {
     if (insertError.code === "23505") {
       const { data: activeJob } = await supabase
         .from("mercadopago_manual_sync_jobs")
-        .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+        .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message,begin_date,end_date")
         .eq("user_id", userId)
         .in("status", ["requesting", "pending", "processing"])
         .order("requested_at", { ascending: false })
@@ -853,7 +853,7 @@ async function requestManualSync(
         updated_at: new Date().toISOString(),
       })
       .eq("id", newJob.id)
-      .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+      .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message,begin_date,end_date")
       .single();
     if (updateError) throw updateError;
 
@@ -1036,7 +1036,7 @@ async function handleUserRequest(request: Request, supabase: ReturnType<typeof c
         .maybeSingle(),
       supabase
         .from("mercadopago_manual_sync_jobs")
-        .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+        .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message,begin_date,end_date")
         .eq("user_id", userId)
         .order("requested_at", { ascending: false })
         .limit(1)
