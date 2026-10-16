@@ -170,7 +170,7 @@ function parseMpStatement(text) {
     let externalId = `${identity}|${type}|${date}|${amount.toFixed(2)}`;
     seen[externalId] = (seen[externalId] || 0) + 1;
     if (seen[externalId] > 1) externalId = `${externalId}#${seen[externalId]}`;
-    expenses.push({ externalId, date, description, amount: Math.abs(amount) });
+    expenses.push({ externalId, date, description, amount: Math.abs(amount), mpOperationId: sourceId });
   }
   return { expenses, incomeCount };
 }
@@ -1084,6 +1084,7 @@ export default function Dashboard() {
     const payload = chosen.map((r) => ({
       category_id: r.categoryId || null,
       description: r.description,
+      mp_operation_id: r.mpOperationId || null,
       amount: r.amount,
       date: r.date,
       source: "mercadopago",
@@ -1120,7 +1121,11 @@ export default function Dashboard() {
   const displayedTx = transactionBase.filter((transaction) => {
     const category = categories.find((item) => item.id === transaction.category_id);
     const search = transactionSearch.trim().toLowerCase();
-    if (search && !transaction.description.toLowerCase().includes(search) && !(category?.name || "").toLowerCase().includes(search)) return false;
+    const searchableText = [transaction.description, transaction.counterpart_name, transaction.mp_operation_type, category?.name]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    if (search && !searchableText.includes(search)) return false;
     if (transactionCategory && transaction.category_id !== transactionCategory) return false;
     if (transactionDateFrom && transaction.date < transactionDateFrom) return false;
     if (transactionDateTo && transaction.date > transactionDateTo) return false;
@@ -1307,8 +1312,12 @@ export default function Dashboard() {
                       <button type="button" className="et-tx-main-button" aria-label={`Editar ${t.description}`} onClick={() => openTxEdit(t)}>
                       <span className="et-dot" style={{ background: color }} />
                       <span className="et-tx-main">
-                        <span className="et-tx-desc">{t.description}</span>
+                        <span className="et-tx-desc">{t.counterpart_name || t.description}</span>
+                        {t.counterpart_name && t.description && t.description !== t.counterpart_name && (
+                          <span className="et-tx-meta">{t.description}</span>
+                        )}
                         <span className="et-tx-meta">
+                          {t.mp_operation_type && <span className="et-tx-badge-mp">{t.mp_operation_type.replace(/_/g, " ")}</span>}
                           <span>{cat ? cat.name : "Sin categoría"} · {fmtDate(t.date)}</span>
                           {t.source === "mercadopago" && <span className="et-tx-badge-mp">MP</span>}
                           {t.source === "credit_card" && <span className="et-tx-badge-mp">Tarjeta</span>}

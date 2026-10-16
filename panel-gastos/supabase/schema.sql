@@ -68,6 +68,11 @@ create table if not exists gastos.transactions (
 -- Aplicable también sobre instalaciones existentes. Los valores NULL de gastos
 -- anteriores/manuales pueden coexistir; los movimientos de MP se identifican.
 alter table gastos.transactions add column if not exists external_id text;
+alter table gastos.transactions add column if not exists mp_operation_id text;
+alter table gastos.transactions add column if not exists counterpart_name text;
+alter table gastos.transactions add column if not exists mp_operation_type text;
+create index if not exists transactions_user_mp_operation_id_idx
+  on gastos.transactions (user_id, mp_operation_id) where mp_operation_id is not null;
 alter table gastos.transactions add column if not exists excluded_from_budget boolean not null default false;
 alter table gastos.transactions add column if not exists needs_review boolean not null default false;
 alter table gastos.transactions add column if not exists installment_plan_id uuid;

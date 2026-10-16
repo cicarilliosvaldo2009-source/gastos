@@ -59,7 +59,7 @@ async function getAuthenticatedUser(token: string) {
   return data.user;
 }
 
-function parseCsv(text: string) {
+function parseCsv(text: string, headerKeys: string[] = ["TRANSACTION_DATE", "RELEASE_DATE"]) {
   const source = text.replace(/^\uFEFF/, "");
   const delimiter = source.split(/\r?\n/, 1)[0].includes(";") ? ";" : ",";
   const records: string[][] = [];
@@ -98,9 +98,10 @@ function parseCsv(text: string) {
     if (row.some((value) => value !== "")) records.push(row);
   }
 
-  const headerIndex = records.findIndex((record) =>
-    record.includes("TRANSACTION_DATE") || record.includes("RELEASE_DATE")
-  );
+  const headerIndex = records.findIndex((record) => {
+    const normalized = record.map((value) => value.replace(/^\uFEFF/, "").trim().toUpperCase());
+    return headerKeys.some((key) => normalized.includes(key));
+  });
   if (headerIndex < 0) throw new Error("No encontré el encabezado del reporte de Mercado Pago.");
   return {
     headers: records[headerIndex].map((value) => value.toUpperCase()),
@@ -253,6 +254,261 @@ async function configureDailyReport(accessToken: string) {
   }
 }
 
+type ActivityStatement = { id?: string; status?: string; structure?: { id?: string } };
+
+function argentinaDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return values.year + "-" + values.month + "-" + values.day;
+}
+
+async function configureWithdrawActivityReport(accessToken: string): Promise<string> {
+  const authorization = { Authorization: "Bearer " + accessToken };
+  const baseUrl = "https://api.mercadopago.com/v1/reporting/operations/activities_withdraw";
+  let response = await fetch(baseUrl + "/config", { headers: authorization });
+  let configuration: any;
+
+  if (response.status === 404) {
+    response = await fetch(baseUrl + "/config", {
+      method: "POST",
+      headers: { ...authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        structure: {
+          name: "Gastos - transferencias y retiros",
+          columns: [
+            { key: "date_created" },
+            { key: "operation_id" },
+            { key: "operation_type" },
+            { key: "transaction_amount" },
+            { key: "counterpart_name" },
+          ],
+          file_format: {
+            column_separator: ";",
+            decimal_separator: ".",
+            date_format: "yyyy-MM-dd",
+            name: "gastos-withdrawals",
+            prefix: "gastos-withdrawals-",
+          },
+          display_timezone: "GMT-03",
+        },
+        notifiers: [{ type: "internal_sftp", data: {} }],
+      }),
+    });
+    if (response.status === 409) response = await fetch(baseUrl + "/config", { headers: authorization });
+    if (!response.ok) throw new Error("Mercado Pago no permitió crear la configuración del reporte de transferencias.");
+    configuration = await response.json();
+  } else if (!response.ok) {
+    throw new Error("Mercado Pago no permitió consultar la configuración del reporte de transferencias.");
+  } else {
+    configuration = await response.json();
+  }
+
+  let structure = configuration?.structure;
+  if (!structure?.id) throw new Error("Mercado Pago no devolvió la configuración del reporte de transferencias.");
+  const requiredColumns = ["date_created", "operation_id", "operation_type", "transaction_amount", "counterpart_name"];
+  const existingColumns = Array.isArray(structure.columns) ? structure.columns : [];
+  const existingKeys = new Set(existingColumns.map((column: { key?: string }) => column.key));
+  const missingColumns = requiredColumns.filter((key) => !existingKeys.has(key));
+
+  if (missingColumns.length > 0) {
+    const updatedStructure = {
+      name: structure.name || "Gastos - transferencias y retiros",
+      columns: [...existingColumns, ...missingColumns.map((key) => ({ key }))],
+      ...(structure.file_format ? { file_format: structure.file_format } : {}),
+      ...(structure.display_timezone ? { display_timezone: structure.display_timezone } : {}),
+    };
+    const updateResponse = await fetch(baseUrl + "/config/" + encodeURIComponent(structure.id), {
+      method: "PUT",
+      headers: { ...authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ structure: updatedStructure }),
+    });
+    if (!updateResponse.ok) throw new Error("Mercado Pago no permitió agregar los datos de contraparte al reporte.");
+    configuration = await updateResponse.json();
+    structure = configuration?.structure || structure;
+  }
+
+  if (structure.scheduled !== true) {
+    const notifierIds = (configuration?.notifiers || [])
+      .map((notifier: { id?: string }) => notifier.id)
+      .filter((id: unknown): id is string => typeof id === "string" && id.length > 0);
+    const scheduleResponse = await fetch(baseUrl + "/schedule", {
+      method: "POST",
+      headers: { ...authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "frequency",
+        data: { period: "daily", value: 1, hour: 6 },
+        structure_id: structure.id,
+        notifiers: notifierIds,
+      }),
+    });
+    if (!scheduleResponse.ok && scheduleResponse.status !== 409) {
+      throw new Error("Mercado Pago no permitió programar el reporte diario de transferencias.");
+    }
+  }
+  return structure.id;
+}
+
+async function enrichTransactionsFromWithdrawCsv(
+  supabase: ReturnType<typeof createAdminClient>,
+  userId: string,
+  csv: string,
+) {
+  const { headers, rows } = parseCsv(csv, ["OPERATION_ID"]);
+  const operationIdIndex = headers.indexOf("OPERATION_ID");
+  const counterpartIndex = headers.indexOf("COUNTERPART_NAME");
+  const operationTypeIndex = headers.indexOf("OPERATION_TYPE");
+  if (operationIdIndex < 0 || (counterpartIndex < 0 && operationTypeIndex < 0)) return 0;
+
+  const { data: transactions, error } = await supabase
+    .from("transactions")
+    .select("id, external_id, mp_operation_id")
+    .eq("user_id", userId)
+    .eq("source", "mercadopago");
+  if (error) throw error;
+
+  const transactionIdsByOperation = new Map<string, string[]>();
+  for (const transaction of transactions || []) {
+    const externalIdentity = String(transaction.external_id || "").split("|", 1)[0];
+    const operationId = String(transaction.mp_operation_id || externalIdentity).trim();
+    if (!operationId) continue;
+    const ids = transactionIdsByOperation.get(operationId) || [];
+    ids.push(transaction.id);
+    transactionIdsByOperation.set(operationId, ids);
+  }
+
+  const updatedIds = new Set<string>();
+  for (const columns of rows) {
+    const operationId = (columns[operationIdIndex] || "").trim();
+    const matchingIds = transactionIdsByOperation.get(operationId);
+    if (!operationId || !matchingIds?.length) continue;
+
+    const counterpartName = counterpartIndex >= 0 ? (columns[counterpartIndex] || "").trim() : "";
+    const operationType = operationTypeIndex >= 0 ? (columns[operationTypeIndex] || "").trim() : "";
+    const patch: Record<string, string> = {};
+    if (counterpartName) patch.counterpart_name = counterpartName;
+    if (operationType) patch.mp_operation_type = operationType;
+    if (Object.keys(patch).length === 0) continue;
+
+    const { error: updateError } = await supabase
+      .from("transactions")
+      .update(patch)
+      .eq("user_id", userId)
+      .in("id", matchingIds);
+    if (updateError) throw updateError;
+    matchingIds.forEach((id) => updatedIds.add(id));
+  }
+  return updatedIds.size;
+}
+
+async function syncWithdrawActivityReport(
+  supabase: ReturnType<typeof createAdminClient>,
+  userId: string,
+  accessToken: string,
+) {
+  const reportId = "activities_withdraw";
+  const baseUrl = "https://api.mercadopago.com/v1/reporting/operations/" + reportId;
+  const headers = { Authorization: "Bearer " + accessToken };
+  const configuredStructureId = await configureWithdrawActivityReport(accessToken);
+
+  let updatedCount = 0;
+  const stateId = "mercadopago-withdrawals-backfill:" + userId;
+  const { data: state, error: stateError } = await supabase
+    .from("sync_state")
+    .select("last_file_name,synced_at")
+    .eq("id", stateId)
+    .maybeSingle();
+  if (stateError) throw stateError;
+
+  let backfillUid = state?.last_file_name || "";
+  const backfillDone = backfillUid.startsWith("done:");
+  const retryAfterFailure = backfillUid.startsWith("failed:")
+    && Date.now() - new Date(state?.synced_at || 0).getTime() < 24 * 60 * 60 * 1000;
+
+  if (!backfillDone && !retryAfterFailure) {
+    if (backfillUid.startsWith("failed:")) backfillUid = "";
+    if (!backfillUid) {
+      const endDate = argentinaDate();
+      const start = new Date(endDate + "T12:00:00-03:00");
+      start.setDate(start.getDate() - 364);
+      const beginDate = argentinaDate(start);
+      const createResponse = await fetch(baseUrl + "/statements", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filters: {
+            creation_date: {
+              range: {
+                gte: beginDate + "T00:00:00-03:00",
+                lte: endDate + "T23:59:59-03:00",
+              },
+            },
+          },
+        }),
+      });
+      if (!createResponse.ok) throw new Error("Mercado Pago no pudo solicitar el reporte histórico de transferencias.");
+      const task = await createResponse.json();
+      if (typeof task.record_id !== "string" || !task.record_id) {
+        throw new Error("Mercado Pago no devolvió el identificador del reporte histórico.");
+      }
+      backfillUid = task.record_id;
+      const { error: stateSaveError } = await supabase.from("sync_state").upsert({
+        id: stateId, last_file_name: backfillUid, synced_at: new Date().toISOString(),
+      });
+      if (stateSaveError) throw stateSaveError;
+    }
+
+    const taskResponse = await fetch(baseUrl + "/statements/" + encodeURIComponent(backfillUid), { headers });
+    if (!taskResponse.ok) throw new Error("No se pudo consultar el estado del reporte histórico de transferencias.");
+    const task = await taskResponse.json();
+    if (task.status === "available") {
+      const downloadResponse = await fetch(baseUrl + "/statements/" + encodeURIComponent(backfillUid) + "/download?format=csv", { headers });
+      if (!downloadResponse.ok) throw new Error("No se pudo descargar el reporte histórico de transferencias.");
+      const csv = await downloadResponse.text();
+      if (csv.startsWith("PK")) throw new Error("Mercado Pago comprimió el reporte histórico; no se pudo leer el CSV.");
+      updatedCount += await enrichTransactionsFromWithdrawCsv(supabase, userId, csv);
+      backfillUid = "done:" + backfillUid;
+      const { error: doneError } = await supabase.from("sync_state").upsert({
+        id: stateId, last_file_name: backfillUid, synced_at: new Date().toISOString(),
+      });
+      if (doneError) throw doneError;
+    } else if (task.status === "failed" || task.status === "empty") {
+      backfillUid = "failed:" + backfillUid;
+      const { error: failedError } = await supabase.from("sync_state").upsert({
+        id: stateId, last_file_name: backfillUid, synced_at: new Date().toISOString(),
+      });
+      if (failedError) throw failedError;
+      if (task.status === "failed") throw new Error("Mercado Pago no pudo generar el reporte histórico de transferencias.");
+    }
+  }
+
+  const createdFrom = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  const listResponse = await fetch(
+    baseUrl + "/statements?size=1000&page=1&created_from=" + encodeURIComponent(createdFrom),
+    { headers },
+  );
+  if (!listResponse.ok) throw new Error("No se pudieron listar los reportes recientes de transferencias.");
+  const reportList = await listResponse.json();
+  const reports = Array.isArray(reportList?.results) ? reportList.results : [];
+
+  for (const report of reports as ActivityStatement[]) {
+    if (report.status !== "available" || !report.id) continue;
+    if (report.structure?.id && report.structure.id !== configuredStructureId) continue;
+    if (report.id === backfillUid.replace(/^done:/, "")) continue;
+    const downloadResponse = await fetch(
+      baseUrl + "/statements/" + encodeURIComponent(report.id) + "/download?format=csv",
+      { headers },
+    );
+    if (!downloadResponse.ok) continue;
+    const csv = await downloadResponse.text();
+    if (csv.startsWith("PK")) continue;
+    updatedCount += await enrichTransactionsFromWithdrawCsv(supabase, userId, csv);
+  }
+  return updatedCount;
+}
+
 async function syncUserReport(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
@@ -260,6 +516,15 @@ async function syncUserReport(
   reportOverride?: SettlementReport,
 ) {
   try {
+    let counterpartCount = 0;
+    let counterpartSyncWarning = false;
+    try {
+      counterpartCount = await syncWithdrawActivityReport(supabase, userId, accessToken);
+    } catch (activityError) {
+      counterpartSyncWarning = true;
+      console.error("No se pudieron actualizar los datos de contraparte", userId, activityError);
+    }
+
     let readyReports: SettlementReport[] = reportOverride ? [reportOverride] : [];
     let pendingReports = false;
 
@@ -288,8 +553,14 @@ async function syncUserReport(
       const message = pendingReports
         ? "Mercado Pago todavía está procesando el reporte. Se volverá a consultar automáticamente."
         : "Mercado Pago todavía no generó un reporte disponible para esta cuenta. Se volverá a consultar automáticamente.";
-      await saveSyncStatus(supabase, userId, "success", 0, 0, message);
-      return { importedCount: 0, skippedCount: 0, message };
+      const detail = counterpartCount > 0
+        ? " Se actualizaron datos de contraparte en " + counterpartCount + " movimientos."
+        : counterpartSyncWarning
+          ? " No se pudieron consultar los destinatarios en este intento."
+          : "";
+      const finalMessage = message + detail;
+      await saveSyncStatus(supabase, userId, "success", 0, 0, finalMessage);
+      return { importedCount: 0, skippedCount: 0, counterpartCount, message: finalMessage };
     }
 
     // Revisa todos los reportes procesados, no solo el más reciente. MP puede
@@ -386,6 +657,7 @@ async function syncUserReport(
           date,
           source: "mercadopago",
           external_id: externalId,
+          mp_operation_id: sourceId || null,
           needs_review: !found,
         }];
       });
@@ -411,11 +683,17 @@ async function syncUserReport(
     });
     if (stateSaveError) throw stateSaveError;
 
-    const message = importedCount > 0
+    const baseMessage = importedCount > 0
       ? "Se procesaron " + readyReports.length + " reportes disponibles y se importaron " + importedCount + " gastos."
       : "Se revisaron " + readyReports.length + " reportes procesados; no había movimientos nuevos.";
+    const detail = counterpartCount > 0
+      ? " Se actualizaron datos de contraparte en " + counterpartCount + " movimientos."
+      : counterpartSyncWarning
+        ? " No se pudieron consultar los destinatarios en este intento."
+        : "";
+    const message = baseMessage + detail;
     await saveSyncStatus(supabase, userId, "success", importedCount, skippedCount, message);
-    return { importedCount, skippedCount, message };
+    return { importedCount, skippedCount, counterpartCount, message };
   } catch (error) {
     console.error("Error al sincronizar la cuenta de Mercado Pago", userId, error);
     try {
