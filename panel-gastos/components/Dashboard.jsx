@@ -426,7 +426,7 @@ export default function Dashboard() {
   }, [configModalOpen, userId, supabase]);
 
   useEffect(() => {
-    if (!configModalOpen || !userId) return undefined;
+    if (!userId) return undefined;
     const activeStatuses = ["requesting", "pending", "processing"];
     if (!activeStatuses.includes(manualSyncJob?.status)) return undefined;
 
