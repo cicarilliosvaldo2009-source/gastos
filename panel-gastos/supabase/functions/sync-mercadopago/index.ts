@@ -6,6 +6,14 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const LEGACY_MP_TOKEN = Deno.env.get("MP_ACCESS_TOKEN") ?? "";
 const LEGACY_USER_ID = Deno.env.get("MP_SYNC_USER_ID") ?? "";
 
+type SettlementReport = {
+  id?: number;
+  status?: string;
+  file_name?: string;
+  date_created?: string;
+  generation_date?: string;
+};
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, apikey, x-client-info, content-type",
@@ -130,6 +138,19 @@ function currentArgentinaMonth() {
   return values.year + "-" + values.month + "-01";
 }
 
+function previousArgentinaDayStartUtc() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const today = values.year + "-" + values.month + "-" + values.day;
+  const todayStart = new Date(today + "T00:00:00-03:00");
+  return new Date(todayStart.getTime() - 24 * 60 * 60 * 1000).toISOString();
+}
+
 async function generateAutomaticDebits(supabase: ReturnType<typeof createAdminClient>) {
   const monthStart = currentArgentinaMonth();
   const { data: debits, error: debitError } = await supabase
@@ -236,26 +257,32 @@ async function syncUserReport(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   accessToken: string,
+  reportOverride?: SettlementReport,
 ) {
   try {
-    const listResponse = await fetch(
-      "https://api.mercadopago.com/v1/account/settlement_report/list",
-      { headers: { Authorization: "Bearer " + accessToken } },
-    );
-    if (!listResponse.ok) {
-      if (listResponse.status === 401 || listResponse.status === 403) {
-        throw new Error("Mercado Pago rechazó el Access Token o sus permisos.");
-      }
-      throw new Error("No se pudieron consultar los reportes de Mercado Pago.");
-    }
+    let readyReports: SettlementReport[] = reportOverride ? [reportOverride] : [];
+    let pendingReports = false;
 
-    const reportList = await listResponse.json();
-    const reports = Array.isArray(reportList) ? reportList : [];
-    const readyReports = reports.filter((report) => report.status === "processed" && report.file_name);
-    const pendingReports = reports.some((report) => {
-      const status = String(report.status || "").toLowerCase();
-      return report.file_name && !["processed", "error", "failed"].includes(status);
-    });
+    if (!reportOverride) {
+      const listResponse = await fetch(
+        "https://api.mercadopago.com/v1/account/settlement_report/list",
+        { headers: { Authorization: "Bearer " + accessToken } },
+      );
+      if (!listResponse.ok) {
+        if (listResponse.status === 401 || listResponse.status === 403) {
+          throw new Error("Mercado Pago rechazó el Access Token o sus permisos.");
+        }
+        throw new Error("No se pudieron consultar los reportes de Mercado Pago.");
+      }
+
+      const reportList = await listResponse.json();
+      const reports: SettlementReport[] = Array.isArray(reportList) ? reportList : [];
+      readyReports = reports.filter((report) => report.status === "processed" && report.file_name);
+      pendingReports = reports.some((report) => {
+        const status = String(report.status || "").toLowerCase();
+        return report.file_name && !["processed", "error", "failed"].includes(status);
+      });
+    }
 
     if (readyReports.length === 0) {
       const message = pendingReports
@@ -419,6 +446,288 @@ async function getUserConnection(
   return Boolean(connection || (LEGACY_MP_TOKEN && LEGACY_USER_ID === userId));
 }
 
+type ManualSyncJob = {
+  id: string;
+  user_id: string;
+  task_id: number | null;
+  requested_at: string;
+  ready_at: string | null;
+  processed_at: string | null;
+  status: "requesting" | "pending" | "processing" | "completed" | "failed";
+  imported_count: number;
+  skipped_count: number;
+  last_message: string | null;
+  updated_at: string;
+  begin_date: string;
+  end_date: string;
+};
+
+async function requestManualSync(
+  supabase: ReturnType<typeof createAdminClient>,
+  userId: string,
+) {
+  const { data: existingJob, error: existingError } = await supabase
+    .from("mercadopago_manual_sync_jobs")
+    .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+    .eq("user_id", userId)
+    .in("status", ["requesting", "pending", "processing"])
+    .order("requested_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (existingError) {
+    console.error("No se pudo revisar una sincronización manual pendiente", userId, existingError);
+    return jsonResponse({ error: "No se pudo consultar el estado de sincronización." }, 500);
+  }
+  if (existingJob) {
+    return jsonResponse({
+      manualSyncJob: existingJob,
+      message: "Ya hay una sincronización manual en curso.",
+    });
+  }
+
+  const { data: credential, error: credentialError } = await supabase
+    .from("mercadopago_credentials")
+    .select("access_token")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (credentialError) throw credentialError;
+  const accessToken = credential?.access_token
+    || (LEGACY_MP_TOKEN && LEGACY_USER_ID === userId ? LEGACY_MP_TOKEN : "");
+  if (!accessToken) {
+    return jsonResponse({ error: "Conectá Mercado Pago antes de sincronizar." }, 400);
+  }
+
+  const beginDate = previousArgentinaDayStartUtc();
+  const endDate = new Date().toISOString();
+  const requestedAt = new Date().toISOString();
+  const { data: newJob, error: insertError } = await supabase
+    .from("mercadopago_manual_sync_jobs")
+    .insert({
+      user_id: userId,
+      status: "requesting",
+      requested_at: requestedAt,
+      begin_date: beginDate,
+      end_date: endDate,
+      last_message: "Solicitando el reporte a Mercado Pago.",
+    })
+    .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+    .single();
+
+  if (insertError) {
+    if (insertError.code === "23505") {
+      const { data: activeJob } = await supabase
+        .from("mercadopago_manual_sync_jobs")
+        .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+        .eq("user_id", userId)
+        .in("status", ["requesting", "pending", "processing"])
+        .order("requested_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (activeJob) return jsonResponse({ manualSyncJob: activeJob, message: "Ya hay una sincronización manual en curso." });
+    }
+    console.error("No se pudo registrar la sincronización manual", userId, insertError);
+    return jsonResponse({ error: "No se pudo iniciar la sincronización." }, 500);
+  }
+
+  try {
+    const response = await fetch("https://api.mercadopago.com/v1/account/settlement_report", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + accessToken,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ begin_date: beginDate, end_date: endDate }),
+    });
+
+    if (!response.ok) {
+      const statusMessage = response.status === 401 || response.status === 403
+        ? "Mercado Pago rechazó el Access Token o sus permisos."
+        : "Mercado Pago no pudo crear el reporte (HTTP " + response.status + ").";
+      await supabase.from("mercadopago_manual_sync_jobs").update({
+        status: "failed",
+        last_message: statusMessage,
+        updated_at: new Date().toISOString(),
+      }).eq("id", newJob.id);
+      return jsonResponse({ error: statusMessage }, response.status === 401 || response.status === 403 ? 400 : 502);
+    }
+
+    const reportTask = await response.json();
+    const taskId = Number(reportTask.id);
+    if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+      throw new Error("Mercado Pago no devolvió un identificador válido para el reporte.");
+    }
+    const readyAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const { data: updatedJob, error: updateError } = await supabase
+      .from("mercadopago_manual_sync_jobs")
+      .update({
+        task_id: taskId,
+        status: "pending",
+        ready_at: readyAt,
+        last_message: "Pedido enviado. La descarga se intentará después de 10 minutos.",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", newJob.id)
+      .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+      .single();
+    if (updateError) throw updateError;
+
+    return jsonResponse({
+      manualSyncJob: updatedJob,
+      message: "Mercado Pago recibió el pedido. El reporte se consultará después de 10 minutos.",
+    });
+  } catch (error) {
+    console.error("No se pudo solicitar el reporte manual de Mercado Pago", userId, error);
+    const message = "No se pudo solicitar el reporte a Mercado Pago. Probá de nuevo más tarde.";
+    await supabase.from("mercadopago_manual_sync_jobs").update({
+      status: "failed",
+      last_message: message,
+      updated_at: new Date().toISOString(),
+    }).eq("id", newJob.id);
+    return jsonResponse({ error: message }, 502);
+  }
+}
+
+async function processManualSyncJobs(supabase: ReturnType<typeof createAdminClient>) {
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+  const { error: recoveryError } = await supabase
+    .from("mercadopago_manual_sync_jobs")
+    .update({
+      status: "pending",
+      ready_at: now.toISOString(),
+      last_message: "Reanudando una consulta interrumpida.",
+      updated_at: now.toISOString(),
+    })
+    .eq("status", "processing")
+    .lt("updated_at", staleBefore);
+  if (recoveryError) throw recoveryError;
+
+  const { error: requestRecoveryError } = await supabase
+    .from("mercadopago_manual_sync_jobs")
+    .update({
+      status: "failed",
+      last_message: "No se pudo confirmar el pedido a Mercado Pago. Podés volver a intentarlo.",
+      updated_at: now.toISOString(),
+    })
+    .eq("status", "requesting")
+    .lt("updated_at", staleBefore);
+  if (requestRecoveryError) throw requestRecoveryError;
+
+  const { data: jobs, error: jobsError } = await supabase
+    .from("mercadopago_manual_sync_jobs")
+    .select("*")
+    .eq("status", "pending")
+    .lte("ready_at", now.toISOString())
+    .order("ready_at", { ascending: true })
+    .limit(10);
+  if (jobsError) throw jobsError;
+
+  let completedCount = 0;
+  let retryCount = 0;
+  let failedCount = 0;
+  for (const job of (jobs || []) as ManualSyncJob[]) {
+    const claimedAt = new Date().toISOString();
+    const { data: claimed, error: claimError } = await supabase
+      .from("mercadopago_manual_sync_jobs")
+      .update({ status: "processing", updated_at: claimedAt })
+      .eq("id", job.id)
+      .eq("status", "pending")
+      .select("*")
+      .maybeSingle();
+    if (claimError) throw claimError;
+    if (!claimed) continue;
+
+    let shouldFail = false;
+    try {
+      const { data: credential, error: credentialError } = await supabase
+        .from("mercadopago_credentials")
+        .select("access_token")
+        .eq("user_id", claimed.user_id)
+        .maybeSingle();
+      if (credentialError) throw credentialError;
+      const accessToken = credential?.access_token
+        || (LEGACY_MP_TOKEN && LEGACY_USER_ID === claimed.user_id ? LEGACY_MP_TOKEN : "");
+      if (!accessToken) {
+        shouldFail = true;
+        throw new Error("La cuenta ya no tiene un Access Token de Mercado Pago.");
+      }
+      if (!claimed.task_id || claimed.task_id <= 0) {
+        shouldFail = true;
+        throw new Error("No se encontró el identificador de la tarea de Mercado Pago.");
+      }
+
+      const taskResponse = await fetch(
+        "https://api.mercadopago.com/v1/account/settlement_report/task/" + claimed.task_id
+          + "?access_token=" + encodeURIComponent(accessToken),
+        { headers: { Authorization: "Bearer " + accessToken } },
+      );
+      if (!taskResponse.ok) {
+        if ([401, 403, 404].includes(taskResponse.status)) shouldFail = true;
+        throw new Error("Mercado Pago respondió HTTP " + taskResponse.status + " al consultar el reporte.");
+      }
+      const reportTask: SettlementReport = await taskResponse.json();
+      const taskStatus = String(reportTask.status || "").toLowerCase();
+
+      if (taskStatus === "error" || taskStatus === "failed") {
+        shouldFail = true;
+        throw new Error("Mercado Pago no pudo generar el reporte.");
+      }
+      if (taskStatus !== "processed" || !reportTask.file_name) {
+        if (Date.now() - new Date(claimed.requested_at).getTime() >= 60 * 60 * 1000) {
+          shouldFail = true;
+          throw new Error("Mercado Pago sigue procesando el reporte después de una hora.");
+        }
+        const retryAt = new Date(Date.now() + 60 * 1000).toISOString();
+        const { error } = await supabase.from("mercadopago_manual_sync_jobs").update({
+          status: "pending",
+          ready_at: retryAt,
+          last_message: "Mercado Pago está preparando el reporte. Se volverá a consultar en un minuto.",
+          updated_at: new Date().toISOString(),
+        }).eq("id", claimed.id);
+        if (error) throw error;
+        retryCount += 1;
+        continue;
+      }
+
+      const result = await syncUserReport(supabase, claimed.user_id, accessToken, {
+        ...reportTask,
+        status: "processed",
+      });
+      const { error: completeError } = await supabase.from("mercadopago_manual_sync_jobs").update({
+        status: "completed",
+        imported_count: result.importedCount,
+        skipped_count: result.skippedCount,
+        last_message: result.message,
+        processed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", claimed.id);
+      if (completeError) throw completeError;
+      completedCount += 1;
+    } catch (error) {
+      const expired = Date.now() - new Date(claimed.requested_at).getTime() >= 60 * 60 * 1000;
+      const message = error instanceof Error ? error.message : "No se pudo completar el reporte de Mercado Pago.";
+      if (shouldFail || expired) {
+        await supabase.from("mercadopago_manual_sync_jobs").update({
+          status: "failed",
+          last_message: shouldFail ? message : "No se pudo completar el reporte después de varios intentos.",
+          updated_at: new Date().toISOString(),
+        }).eq("id", claimed.id);
+        failedCount += 1;
+      } else {
+        await supabase.from("mercadopago_manual_sync_jobs").update({
+          status: "pending",
+          ready_at: new Date(Date.now() + 60 * 1000).toISOString(),
+          last_message: "No se pudo consultar el reporte todavía. Se volverá a intentar en un minuto.",
+          updated_at: new Date().toISOString(),
+        }).eq("id", claimed.id);
+        retryCount += 1;
+      }
+    }
+  }
+
+  return jsonResponse({ completedCount, retryCount, failedCount });
+}
+
 async function handleUserRequest(request: Request, supabase: ReturnType<typeof createAdminClient>, userId: string) {
   let body: { action?: string; accessToken?: string } = {};
   try {
@@ -428,7 +737,7 @@ async function handleUserRequest(request: Request, supabase: ReturnType<typeof c
   }
 
   if (body.action === "status") {
-    const [{ data: connection, error: connectionError }, { data: syncStatus, error: statusError }] = await Promise.all([
+    const [connectionResult, statusResult, manualJobResult] = await Promise.all([
       supabase
         .from("mercadopago_credentials")
         .select("user_id")
@@ -439,15 +748,28 @@ async function handleUserRequest(request: Request, supabase: ReturnType<typeof c
         .select("last_checked_at,last_status,imported_count,skipped_count,last_message")
         .eq("user_id", userId)
         .maybeSingle(),
+      supabase
+        .from("mercadopago_manual_sync_jobs")
+        .select("id,status,requested_at,ready_at,processed_at,imported_count,skipped_count,last_message")
+        .eq("user_id", userId)
+        .order("requested_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
     ]);
-    if (connectionError || statusError) {
-      console.error("No se pudo consultar la conexión de Mercado Pago", userId, connectionError || statusError);
+    const queryError = connectionResult.error || statusResult.error || manualJobResult.error;
+    if (queryError) {
+      console.error("No se pudo consultar el estado de Mercado Pago", userId, queryError);
       return jsonResponse({ error: "No se pudo consultar la conexión." }, 500);
     }
     return jsonResponse({
-      connected: Boolean(connection || (LEGACY_MP_TOKEN && LEGACY_USER_ID === userId)),
-      syncStatus: syncStatus || null,
+      connected: Boolean(connectionResult.data || (LEGACY_MP_TOKEN && LEGACY_USER_ID === userId)),
+      syncStatus: statusResult.data || null,
+      manualSyncJob: manualJobResult.data || null,
     });
+  }
+
+  if (body.action === "manual-sync") {
+    return await requestManualSync(supabase, userId);
   }
 
   if (body.action === "connect") {
@@ -564,6 +886,10 @@ Deno.serve(async (request: Request) => {
 
     const supabase = createAdminClient();
     if (getJwtRole(token) === "service_role") {
+      const serviceBody = await request.clone().json().catch(() => ({}));
+      if (serviceBody?.action === "process-manual-sync-jobs") {
+        return await processManualSyncJobs(supabase);
+      }
       return await runScheduledSync(supabase);
     }
 
