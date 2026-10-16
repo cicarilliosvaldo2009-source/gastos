@@ -184,6 +184,8 @@ export default function Dashboard() {
   const [userId, setUserId] = useState("");
   const [lastCategoryId, setLastCategoryId] = useState("");
   const [mpSyncStatus, setMpSyncStatus] = useState(null);
+  const [manualSyncJob, setManualSyncJob] = useState(null);
+  const [manualSyncSaving, setManualSyncSaving] = useState(false);
   const [mpSyncStatusLoading, setMpSyncStatusLoading] = useState(true);
   const [mpSyncStatusError, setMpSyncStatusError] = useState(false);
   const [mpConnected, setMpConnected] = useState(false);
@@ -266,6 +268,7 @@ export default function Dashboard() {
   const [recurringExpenses, setRecurringExpenses] = useState([]);
 
   const fileInputRef = useRef(null);
+  const refreshedManualSyncJobRef = useRef(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importRows, setImportRows] = useState([]);
   const [importInfo, setImportInfo] = useState({ duplicates: 0, incomeCount: 0 });
@@ -398,6 +401,7 @@ export default function Dashboard() {
           setMpConnectionError(true);
         } else {
           setMpConnected(Boolean(connectionResult.data?.connected));
+          setManualSyncJob(connectionResult.data?.manualSyncJob || null);
           setMpConnectionError(false);
         }
       } catch (error) {
@@ -420,6 +424,47 @@ export default function Dashboard() {
       cancelled = true;
     };
   }, [configModalOpen, userId, supabase]);
+
+  useEffect(() => {
+    if (!configModalOpen || !userId) return undefined;
+    const activeStatuses = ["requesting", "pending", "processing"];
+    if (!activeStatuses.includes(manualSyncJob?.status)) return undefined;
+
+    let cancelled = false;
+    const checkManualSync = async () => {
+      const { data, error } = await supabase.functions.invoke("sync-mercadopago", {
+        body: { action: "status" },
+      });
+      if (cancelled || error || !data) return;
+      setManualSyncJob(data.manualSyncJob || null);
+      if (data.syncStatus) setMpSyncStatus(data.syncStatus);
+    };
+
+    const interval = window.setInterval(checkManualSync, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [configModalOpen, userId, manualSyncJob?.status, supabase]);
+
+  useEffect(() => {
+    if (!manualSyncJob?.id || manualSyncJob.status !== "completed") return;
+    if (refreshedManualSyncJobRef.current === manualSyncJob.id) return;
+    refreshedManualSyncJobRef.current = manualSyncJob.id;
+    let cancelled = false;
+
+    (async () => {
+      const { data, error } = await supabase
+        .from("transactions")
+        .select("*")
+        .order("date", { ascending: false });
+      if (!cancelled && !error) setTransactions(data || []);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [manualSyncJob?.id, manualSyncJob?.status, supabase]);
 
   const viewDate = useMemo(() => {
     const now = new Date();
@@ -922,6 +967,32 @@ export default function Dashboard() {
       setMpCredentialError(error.message || "No se pudo guardar el Access Token.");
     } finally {
       setMpConnectionSaving(false);
+    }
+  }
+
+  async function startManualSync() {
+    setManualSyncSaving(true);
+    setMpCredentialError("");
+    setMpCredentialNotice("");
+    try {
+      const { data, error } = await supabase.functions.invoke("sync-mercadopago", {
+        body: { action: "manual-sync" },
+      });
+      if (error) {
+        let message = "No se pudo iniciar la sincronización.";
+        try {
+          const responseBody = await error.context?.json();
+          if (responseBody?.error) message = responseBody.error;
+        } catch {}
+        throw new Error(message);
+      }
+      if (!data?.manualSyncJob) throw new Error(data?.error || "No se pudo iniciar el reporte.");
+      setManualSyncJob(data.manualSyncJob);
+      setMpCredentialNotice(data.message || "Mercado Pago recibió el pedido.");
+    } catch (error) {
+      setMpCredentialError(error.message || "No se pudo iniciar la sincronización.");
+    } finally {
+      setManualSyncSaving(false);
     }
   }
 
@@ -1623,6 +1694,36 @@ export default function Dashboard() {
 
                 {mpCredentialError && <p role="alert" className="et-settings-error">{mpCredentialError}</p>}
                 {mpCredentialNotice && <p role="status" className="et-settings-notice">{mpCredentialNotice}</p>}
+
+                {mpConnected && !mpTokenEditing && (
+                  <div className="et-settings-manual-sync" role="status" aria-live="polite">
+                    <button
+                      type="button"
+                      className="et-settings-manual-sync-action"
+                      onClick={startManualSync}
+                      disabled={manualSyncSaving || ["requesting", "pending", "processing"].includes(manualSyncJob?.status)}
+                    >
+                      {manualSyncSaving
+                        ? "Solicitando reporte…"
+                        : manualSyncJob?.status === "processing"
+                          ? "Descargando reporte…"
+                          : ["requesting", "pending"].includes(manualSyncJob?.status)
+                            ? "Reporte en preparación…"
+                            : "Sincronizar ahora"}
+                    </button>
+                    {manualSyncJob && (
+                      <span className="et-settings-manual-sync-meta">
+                        {manualSyncJob.status === "requesting"
+                          ? "Solicitando el reporte a Mercado Pago."
+                          : manualSyncJob.status === "pending"
+                            ? "Descarga prevista a partir de " + fmtDateTime(manualSyncJob.ready_at)
+                            : manualSyncJob.status === "processing"
+                            ? "Mercado Pago está procesando la descarga."
+                            : manualSyncJob.last_message || ""}
+                      </span>
+                    )}
+                  </div>
+                )}
 
                 <div className="et-settings-sync-history" role="status" aria-live="polite">
                   <span className="et-settings-kicker">Última sincronización</span>
