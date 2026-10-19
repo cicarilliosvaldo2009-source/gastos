@@ -33,6 +33,12 @@ const fmtDateTime = (dateTime) => dateTime
   }).format(new Date(dateTime))
   : "";
 
+const MP_OMITTED_REASON_LABELS = {
+  non_expense: "Importe cero o positivo",
+  invalid_amount: "Importe vacío o ilegible",
+  invalid_date: "Fecha ilegible",
+};
+
 const fmtMonth = (date) => {
   const s = new Intl.DateTimeFormat("es-AR", { month: "long", year: "numeric" }).format(date);
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -188,6 +194,10 @@ export default function Dashboard() {
   const [manualSyncSaving, setManualSyncSaving] = useState(false);
   const [mpSyncStatusLoading, setMpSyncStatusLoading] = useState(true);
   const [mpSyncStatusError, setMpSyncStatusError] = useState(false);
+  const [mpOmittedRows, setMpOmittedRows] = useState([]);
+  const [mpOmittedRowsLoading, setMpOmittedRowsLoading] = useState(false);
+  const [mpOmittedRowsError, setMpOmittedRowsError] = useState("");
+  const [mpOmittedRowsExpanded, setMpOmittedRowsExpanded] = useState(false);
   const [mpConnected, setMpConnected] = useState(false);
   const [mpConnectionLoading, setMpConnectionLoading] = useState(true);
   const [mpConnectionSaving, setMpConnectionSaving] = useState(false);
@@ -424,6 +434,36 @@ export default function Dashboard() {
       cancelled = true;
     };
   }, [configModalOpen, userId, supabase]);
+
+  useEffect(() => {
+    if (!configModalOpen || !mpOmittedRowsExpanded || !userId) return undefined;
+
+    let cancelled = false;
+    setMpOmittedRowsLoading(true);
+    setMpOmittedRowsError("");
+    supabase
+      .from("mercadopago_omitted_rows")
+      .select("id,source_report,source_id,external_reference,operation_type,description,raw_transaction_amount,raw_settlement_net_amount,selected_amount,raw_date,transaction_date,omission_reason,first_seen_at,last_seen_at")
+      .order("last_seen_at", { ascending: false })
+      .limit(100)
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          console.warn("No se pudieron cargar las filas omitidas de Mercado Pago:", error);
+          setMpOmittedRowsError("No se pudieron cargar los movimientos omitidos.");
+          setMpOmittedRows([]);
+        } else {
+          setMpOmittedRows(data || []);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMpOmittedRowsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [configModalOpen, mpOmittedRowsExpanded, manualSyncJob?.processed_at, userId, supabase]);
 
   useEffect(() => {
     if (!userId) return undefined;
@@ -1760,6 +1800,55 @@ export default function Dashboard() {
                       )}
                       {mpSyncStatus.last_message && <span className="et-sync-message">{mpSyncStatus.last_message}</span>}
                     </>
+                  )}
+                </div>
+
+                <div className="et-settings-omitted">
+                  <button
+                    type="button"
+                    className="et-settings-omitted-toggle"
+                    aria-expanded={mpOmittedRowsExpanded}
+                    onClick={() => setMpOmittedRowsExpanded((expanded) => !expanded)}
+                  >
+                    <span className="et-settings-omitted-heading">
+                      <strong>Gastos omitidos</strong>
+                      <small>Filas del reporte que no entraron como gasto</small>
+                    </span>
+                    <span className="et-settings-omitted-count">{mpOmittedRows.length === 100 ? "100+" : mpOmittedRows.length}</span>
+                    <ChevronDown size={16} className={mpOmittedRowsExpanded ? "is-open" : ""} />
+                  </button>
+                  {mpOmittedRowsExpanded && (
+                    <div className="et-settings-omitted-list">
+                      {mpOmittedRowsLoading ? (
+                        <span className="et-sync-muted">Cargando filas omitidas…</span>
+                      ) : mpOmittedRowsError ? (
+                        <span className="et-settings-error">{mpOmittedRowsError}</span>
+                      ) : mpOmittedRows.length === 0 ? (
+                        <span className="et-sync-muted">No hay filas omitidas registradas. Se mostrarán después de la próxima sincronización.</span>
+                      ) : (
+                        mpOmittedRows.map((row) => (
+                          <article className="et-settings-omitted-row" key={row.id}>
+                            <div className="et-settings-omitted-row-head">
+                              <strong>{row.description || row.operation_type || "Movimiento Mercado Pago"}</strong>
+                              <span>{MP_OMITTED_REASON_LABELS[row.omission_reason] || "Omitido"}</span>
+                            </div>
+                            <div className="et-settings-omitted-row-meta">
+                              {row.operation_type || "Sin tipo"} · {row.transaction_date ? fmtDate(row.transaction_date) : row.raw_date || "Sin fecha"}
+                            </div>
+                            <div className="et-settings-omitted-amounts">
+                              <span><small>Operación</small><strong>{row.raw_transaction_amount || "—"}</strong></span>
+                              <span><small>Impacto neto</small><strong>{row.raw_settlement_net_amount || "—"}</strong></span>
+                              <span><small>Evaluado</small><strong>{row.selected_amount == null ? "—" : fmt(Number(row.selected_amount))}</strong></span>
+                            </div>
+                            {(row.source_id || row.external_reference) && (
+                              <small className="et-settings-omitted-id">
+                                {row.source_id ? "ID MP: " + row.source_id : "Referencia: " + row.external_reference}
+                              </small>
+                            )}
+                          </article>
+                        ))
+                      )}
+                    </div>
                   )}
                 </div>
 

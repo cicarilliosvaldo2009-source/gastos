@@ -627,28 +627,67 @@ async function syncUserReport(
         throw new Error("El reporte no tiene columnas de fecha o importe reconocidas.");
       }
 
+      const transactionAmountIndex = indexOf("TRANSACTION_AMOUNT");
+      const settlementNetAmountIndex = indexOf("SETTLEMENT_NET_AMOUNT");
       const seen: Record<string, number> = {};
-      const inserts = rows.flatMap((columns) => {
-        const amount = amountIndexes
-          .map((index) => parseAmount(columns[index]))
-          .find((value) => value !== null);
-        const date = parseDate(columns[dateIndex]);
-        if (amount == null || amount >= 0 || !date) return [];
-
+      const omittedRows: Record<string, unknown>[] = [];
+      const inserts = rows.flatMap((columns, rowIndex) => {
+        const amountCandidates = amountIndexes.map((index) => ({
+          value: parseAmount(columns[index]),
+          raw: (columns[index] || "").trim(),
+        }));
+        const selectedAmount = amountCandidates.find((candidate) => candidate.value !== null);
+        const amount = selectedAmount?.value ?? null;
+        const rawDate = dateIndex >= 0 ? (columns[dateIndex] || "").trim() : "";
+        const date = parseDate(rawDate);
         const type = typeIndex >= 0 ? (columns[typeIndex] || "").trim() : "";
-        const description = ((descriptionIndex >= 0 && columns[descriptionIndex]) || type || "Movimiento Mercado Pago")
-          .trim()
-          .replace(/\s+/g, " ");
+        const rawDescription = descriptionIndex >= 0 ? (columns[descriptionIndex] || "").trim() : "";
+        const description = (rawDescription || type || "Movimiento Mercado Pago").replace(/\s+/g, " ");
         const sourceId = sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "";
         const reference = referenceIndex >= 0 ? (columns[referenceIndex] || "").trim() : "";
-        const identity = sourceId || reference || description;
-        const baseId = identity + "|" + type + "|" + date + "|" + amount.toFixed(2);
+        const rawTransactionAmount = transactionAmountIndex >= 0 ? (columns[transactionAmountIndex] || "").trim() : "";
+        const rawSettlementNetAmount = settlementNetAmountIndex >= 0 ? (columns[settlementNetAmountIndex] || "").trim() : "";
+        const hasRowData = [rawDate, type, rawDescription, sourceId, reference, rawTransactionAmount, rawSettlementNetAmount]
+          .some((value) => value !== "");
+        if (!hasRowData) return [];
+
+        const identity = sourceId || reference || rawDescription || report.file_name + "|row:" + rowIndex;
+        const amountForKey = amount !== null ? amount.toFixed(2) : selectedAmount?.raw || "";
+        const baseId = identity + "|" + type + "|" + (date || rawDate) + "|" + amountForKey;
         seen[baseId] = (seen[baseId] || 0) + 1;
-        const externalId = seen[baseId] > 1 ? baseId + "#" + seen[baseId] : baseId;
+        const candidateKey = seen[baseId] > 1 ? baseId + "#" + seen[baseId] : baseId;
+        const omittedRecord = {
+          user_id: userId,
+          candidate_key: candidateKey,
+          source_report: report.file_name,
+          source_id: sourceId || null,
+          external_reference: reference || null,
+          operation_type: type || null,
+          description,
+          raw_transaction_amount: rawTransactionAmount || null,
+          raw_settlement_net_amount: rawSettlementNetAmount || null,
+          selected_amount: amount,
+          raw_date: rawDate || null,
+          transaction_date: date,
+          last_seen_at: new Date().toISOString(),
+        };
+
+        if (amount === null) {
+          omittedRows.push({ ...omittedRecord, omission_reason: "invalid_amount" });
+          return [];
+        }
+        if (amount >= 0) {
+          omittedRows.push({ ...omittedRecord, omission_reason: "non_expense" });
+          return [];
+        }
+        if (!date) {
+          omittedRows.push({ ...omittedRecord, omission_reason: "invalid_date" });
+          return [];
+        }
+
         const found = (userRules || []).find((rule) =>
           rule.keyword && description.toLowerCase().includes(rule.keyword.toLowerCase())
         );
-
         return [{
           user_id: userId,
           category_id: found?.category_id || fallbackCategory!.id,
@@ -656,7 +695,7 @@ async function syncUserReport(
           amount: Math.abs(amount),
           date,
           source: "mercadopago",
-          external_id: externalId,
+          external_id: candidateKey,
           mp_operation_id: sourceId || null,
           needs_review: !found,
         }];
@@ -670,6 +709,12 @@ async function syncUserReport(
           .select("id");
         if (error) throw error;
         importedFromReport = importedRows?.length || 0;
+      }
+      if (omittedRows.length > 0) {
+        const { error: omittedError } = await supabase
+          .from("mercadopago_omitted_rows")
+          .upsert(omittedRows, { onConflict: "user_id,candidate_key" });
+        if (omittedError) throw omittedError;
       }
       importedCount += importedFromReport;
       skippedCount += Math.max(inserts.length - importedFromReport, 0);
