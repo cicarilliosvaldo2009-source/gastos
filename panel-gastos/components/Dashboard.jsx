@@ -25,6 +25,14 @@ const fmt = (n) =>
 const fmtDate = (isoDate) =>
   new Intl.DateTimeFormat("es-AR", { day: "2-digit", month: "short" }).format(new Date(isoDate + "T00:00:00"));
 
+const fmtTime = (dateTime) => dateTime
+  ? new Intl.DateTimeFormat("es-AR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/Argentina/Buenos_Aires",
+  }).format(new Date(dateTime))
+  : "";
+
 const fmtDateTime = (dateTime) => dateTime
   ? new Intl.DateTimeFormat("es-AR", {
     dateStyle: "short",
@@ -1158,7 +1166,9 @@ export default function Dashboard() {
     router.refresh();
   }
 
-  const sortedTx = [...monthTx].sort((a, b) => (a.date < b.date ? 1 : -1));
+  const sortedTx = [...monthTx].sort((a, b) =>
+    new Date(b.occurred_at || b.date).getTime() - new Date(a.occurred_at || a.date).getTime()
+  );
   const transactionBase = transactionView === "review" ? pendingReviewTx : sortedTx;
   const displayedTx = transactionBase.filter((transaction) => {
     const category = categories.find((item) => item.id === transaction.category_id);
@@ -1358,9 +1368,15 @@ export default function Dashboard() {
                         {t.counterpart_name && t.description && t.description !== t.counterpart_name && (
                           <span className="et-tx-meta">{t.description}</span>
                         )}
+                        {t.counterpart_account && (
+                          <span className="et-tx-meta">Destino: {t.counterpart_account}</span>
+                        )}
                         <span className="et-tx-meta">
                           {t.mp_operation_type && <span className="et-tx-badge-mp">{t.mp_operation_type.replace(/_/g, " ")}</span>}
-                          <span>{cat ? cat.name : "Sin categoría"} · {fmtDate(t.date)}</span>
+                          <span>
+                            {cat ? cat.name : "Sin categoría"} · {fmtDate(t.date)}
+                            {t.occurred_at && " · " + fmtTime(t.occurred_at)}
+                          </span>
                           {t.source === "mercadopago" && <span className="et-tx-badge-mp">MP</span>}
                           {t.source === "credit_card" && <span className="et-tx-badge-mp">Tarjeta</span>}
                           {t.source === "automatic_debit" && <span className="et-tx-badge-mp">Débito automático</span>}
