@@ -129,6 +129,16 @@ function parseDate(raw: string | undefined) {
   return null;
 }
 
+function parseDateTime(raw: string | undefined) {
+  if (!raw) return null;
+  const value = raw.trim();
+  if (!/[T ]\d{2}:\d{2}/.test(value)) return null;
+  const normalized = value.includes("T") ? value : value.replace(" ", "T");
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
+  const parsed = new Date(hasTimezone ? normalized : normalized + "-03:00");
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
 function currentArgentinaMonth() {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Argentina/Buenos_Aires",
@@ -265,6 +275,22 @@ function argentinaDate(date = new Date()) {
   return values.year + "-" + values.month + "-" + values.day;
 }
 
+async function mercadoPagoErrorSummary(response: Response) {
+  const payload = await response.clone().json().catch(() => null) as Record<string, unknown> | null;
+  const rawCauses = payload && Array.isArray(payload.cause) ? payload.cause : [];
+  const causes = rawCauses.flatMap((cause: unknown) => {
+    if (!cause || typeof cause !== "object") return [];
+    const record = cause as Record<string, unknown>;
+    return [record.description, record.message, record.code];
+  });
+  const details = [payload?.message, payload?.error, ...causes]
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const detail = [...new Set(details)].join("; ").slice(0, 300);
+  return "HTTP " + response.status + (detail ? ": " + detail : "");
+}
+
 async function configureWithdrawActivityReport(accessToken: string): Promise<string> {
   const authorization = { Authorization: "Bearer " + accessToken };
   const baseUrl = "https://api.mercadopago.com/v1/reporting/operations/activities_withdraw";
@@ -284,6 +310,9 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
             { key: "operation_type" },
             { key: "transaction_amount" },
             { key: "counterpart_name" },
+            { key: "bank_account" },
+            { key: "external_reference" },
+            { key: "provider_id" },
           ],
           file_format: {
             column_separator: ";",
@@ -294,11 +323,17 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
           },
           display_timezone: "GMT-03",
         },
-        notifiers: [{ type: "internal_sftp", data: {} }],
+        notifiers: [{
+          type: "internal_sftp",
+          data: {},
+          description: "Entrega SFTP interno de Mercado Pago",
+        }],
       }),
     });
     if (response.status === 409) response = await fetch(baseUrl + "/config", { headers: authorization });
-    if (!response.ok) throw new Error("Mercado Pago no permitió crear la configuración del reporte de transferencias.");
+    if (!response.ok) {
+      throw new Error("Mercado Pago no permitió crear la configuración del reporte de transferencias (" + await mercadoPagoErrorSummary(response) + ").");
+    }
     configuration = await response.json();
   } else if (!response.ok) {
     throw new Error("Mercado Pago no permitió consultar la configuración del reporte de transferencias.");
@@ -308,7 +343,10 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
 
   let structure = configuration?.structure;
   if (!structure?.id) throw new Error("Mercado Pago no devolvió la configuración del reporte de transferencias.");
-  const requiredColumns = ["date_created", "operation_id", "operation_type", "transaction_amount", "counterpart_name"];
+  const requiredColumns = [
+    "date_created", "operation_id", "operation_type", "transaction_amount",
+    "counterpart_name", "bank_account", "external_reference", "provider_id",
+  ];
   const existingColumns = Array.isArray(structure.columns) ? structure.columns : [];
   const existingKeys = new Set(existingColumns.map((column: { key?: string }) => column.key));
   const missingColumns = requiredColumns.filter((key) => !existingKeys.has(key));
@@ -325,7 +363,9 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
       headers: { ...authorization, "Content-Type": "application/json" },
       body: JSON.stringify({ structure: updatedStructure }),
     });
-    if (!updateResponse.ok) throw new Error("Mercado Pago no permitió agregar los datos de contraparte al reporte.");
+    if (!updateResponse.ok) {
+      throw new Error("Mercado Pago no permitió ampliar el reporte de transferencias (" + await mercadoPagoErrorSummary(updateResponse) + ").");
+    }
     configuration = await updateResponse.json();
     structure = configuration?.structure || structure;
   }
@@ -345,7 +385,7 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
       }),
     });
     if (!scheduleResponse.ok && scheduleResponse.status !== 409) {
-      throw new Error("Mercado Pago no permitió programar el reporte diario de transferencias.");
+      throw new Error("Mercado Pago no permitió programar el reporte diario de transferencias (" + await mercadoPagoErrorSummary(scheduleResponse) + ").");
     }
   }
   return structure.id;
@@ -358,47 +398,84 @@ async function enrichTransactionsFromWithdrawCsv(
 ) {
   const { headers, rows } = parseCsv(csv, ["OPERATION_ID"]);
   const operationIdIndex = headers.indexOf("OPERATION_ID");
+  const referenceIndex = headers.indexOf("EXTERNAL_REFERENCE");
   const counterpartIndex = headers.indexOf("COUNTERPART_NAME");
+  const accountIndex = headers.indexOf("BANK_ACCOUNT");
   const operationTypeIndex = headers.indexOf("OPERATION_TYPE");
-  if (operationIdIndex < 0 || (counterpartIndex < 0 && operationTypeIndex < 0)) return 0;
+  const createdAtIndex = headers.indexOf("DATE_CREATED");
+  if (counterpartIndex < 0 && accountIndex < 0 && operationTypeIndex < 0) return 0;
 
   const { data: transactions, error } = await supabase
     .from("transactions")
-    .select("id, external_id, mp_operation_id")
+    .select("id, external_id, mp_operation_id, mp_external_reference, occurred_at")
     .eq("user_id", userId)
     .eq("source", "mercadopago");
   if (error) throw error;
 
   const transactionIdsByOperation = new Map<string, string[]>();
+  const transactionIdsByReference = new Map<string, string[]>();
+  const transactionById = new Map<string, { occurred_at?: string | null }>();
   for (const transaction of transactions || []) {
-    const externalIdentity = String(transaction.external_id || "").split("|", 1)[0];
-    const operationId = String(transaction.mp_operation_id || externalIdentity).trim();
-    if (!operationId) continue;
-    const ids = transactionIdsByOperation.get(operationId) || [];
-    ids.push(transaction.id);
-    transactionIdsByOperation.set(operationId, ids);
+    transactionById.set(transaction.id, { occurred_at: transaction.occurred_at });
+    const external = String(transaction.external_id || "");
+    const legacyOperation = external.startsWith("mp-operation:")
+      ? external.slice("mp-operation:".length).split("|", 1)[0]
+      : "";
+    const operationId = String(transaction.mp_operation_id || legacyOperation).trim();
+    if (operationId) {
+      const ids = transactionIdsByOperation.get(operationId) || [];
+      ids.push(transaction.id);
+      transactionIdsByOperation.set(operationId, ids);
+    }
+    const reference = String(transaction.mp_external_reference || "").trim();
+    if (reference) {
+      const ids = transactionIdsByReference.get(reference) || [];
+      ids.push(transaction.id);
+      transactionIdsByReference.set(reference, ids);
+    }
   }
 
   const updatedIds = new Set<string>();
   for (const columns of rows) {
-    const operationId = (columns[operationIdIndex] || "").trim();
-    const matchingIds = transactionIdsByOperation.get(operationId);
-    if (!operationId || !matchingIds?.length) continue;
+    const operationId = operationIdIndex >= 0 ? (columns[operationIdIndex] || "").trim() : "";
+    const externalReference = referenceIndex >= 0 ? (columns[referenceIndex] || "").trim() : "";
+    let matchingIds = operationId ? transactionIdsByOperation.get(operationId) : undefined;
+    if (!matchingIds?.length && externalReference) {
+      const referenceMatches = transactionIdsByReference.get(externalReference) || [];
+      if (referenceMatches.length === 1) matchingIds = referenceMatches;
+    }
+    if (!matchingIds?.length) continue;
 
     const counterpartName = counterpartIndex >= 0 ? (columns[counterpartIndex] || "").trim() : "";
+    const bankAccount = accountIndex >= 0 ? (columns[accountIndex] || "").trim() : "";
     const operationType = operationTypeIndex >= 0 ? (columns[operationTypeIndex] || "").trim() : "";
+    const occurredAt = createdAtIndex >= 0 ? parseDateTime(columns[createdAtIndex]) : null;
     const patch: Record<string, string> = {};
     if (counterpartName) patch.counterpart_name = counterpartName;
+    if (bankAccount) patch.counterpart_account = bankAccount;
     if (operationType) patch.mp_operation_type = operationType;
-    if (Object.keys(patch).length === 0) continue;
 
-    const { error: updateError } = await supabase
-      .from("transactions")
-      .update(patch)
-      .eq("user_id", userId)
-      .in("id", matchingIds);
-    if (updateError) throw updateError;
-    matchingIds.forEach((id) => updatedIds.add(id));
+    if (Object.keys(patch).length > 0) {
+      const { error: updateError } = await supabase
+        .from("transactions")
+        .update(patch)
+        .eq("user_id", userId)
+        .in("id", matchingIds);
+      if (updateError) throw updateError;
+      matchingIds.forEach((id) => updatedIds.add(id));
+    }
+    if (occurredAt) {
+      const missingTimeIds = matchingIds.filter((id) => !transactionById.get(id)?.occurred_at);
+      if (missingTimeIds.length > 0) {
+        const { error: timeError } = await supabase
+          .from("transactions")
+          .update({ occurred_at: occurredAt })
+          .eq("user_id", userId)
+          .in("id", missingTimeIds);
+        if (timeError) throw timeError;
+        missingTimeIds.forEach((id) => updatedIds.add(id));
+      }
+    }
   }
   return updatedIds.size;
 }
@@ -518,12 +595,18 @@ async function syncUserReport(
   try {
     let counterpartCount = 0;
     let counterpartSyncWarning = false;
-    try {
-      counterpartCount = await syncWithdrawActivityReport(supabase, userId, accessToken);
-    } catch (activityError) {
-      counterpartSyncWarning = true;
-      console.error("No se pudieron actualizar los datos de contraparte", userId, activityError);
-    }
+    let counterpartSyncWarningMessage = "";
+    const syncCounterpartDetails = async () => {
+      try {
+        counterpartCount = await syncWithdrawActivityReport(supabase, userId, accessToken);
+      } catch (activityError) {
+        counterpartSyncWarning = true;
+        counterpartSyncWarningMessage = activityError instanceof Error
+          ? activityError.message
+          : "error desconocido";
+        console.error("No se pudieron actualizar los datos de contraparte", userId, activityError);
+      }
+    };
 
     let readyReports: SettlementReport[] = reportOverride ? [reportOverride] : [];
     let pendingReports = false;
@@ -550,13 +633,14 @@ async function syncUserReport(
     }
 
     if (readyReports.length === 0) {
+      await syncCounterpartDetails();
       const message = pendingReports
         ? "Mercado Pago todavía está procesando el reporte. Se volverá a consultar automáticamente."
         : "Mercado Pago todavía no generó un reporte disponible para esta cuenta. Se volverá a consultar automáticamente.";
       const detail = counterpartCount > 0
         ? " Se actualizaron datos de contraparte en " + counterpartCount + " movimientos."
         : counterpartSyncWarning
-          ? " No se pudieron consultar los destinatarios en este intento."
+          ? " No se pudieron consultar los datos del destinatario/destino: " + counterpartSyncWarningMessage
           : "";
       const finalMessage = message + detail;
       await saveSyncStatus(supabase, userId, "success", 0, 0, finalMessage);
@@ -613,7 +697,8 @@ async function syncUserReport(
 
       const { headers, rows } = parseCsv(await fileResponse.text());
       const indexOf = (name: string) => headers.indexOf(name);
-      const dateIndex = indexOf("TRANSACTION_DATE") >= 0 ? indexOf("TRANSACTION_DATE") : indexOf("RELEASE_DATE");
+      const transactionDateTimeIndex = indexOf("TRANSACTION_DATE");
+      const dateIndex = transactionDateTimeIndex >= 0 ? transactionDateTimeIndex : indexOf("RELEASE_DATE");
       const typeIndex = indexOf("TRANSACTION_TYPE");
       const descriptionIndex = indexOf("DESCRIPTION");
       const sourceIndex = indexOf("SOURCE_ID");
@@ -634,23 +719,54 @@ async function syncUserReport(
         .map((columns) => sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "")
         .filter((sourceId) => sourceId.length > 0))];
       const existingOperationIds = new Set<string>();
+      const existingRowsByOperation = new Map<string, Array<{
+        id: string;
+        occurred_at?: string | null;
+        mp_external_reference?: string | null;
+      }>>();
       for (let offset = 0; offset < reportSourceIds.length; offset += 100) {
         const sourceIdBatch = reportSourceIds.slice(offset, offset + 100);
-        const { data: existingRows, error: existingError } = await supabase
-          .from("transactions")
-          .select("mp_operation_id")
-          .eq("user_id", userId)
-          .eq("source", "mercadopago")
-          .in("mp_operation_id", sourceIdBatch);
-        if (existingError) throw existingError;
-        for (const existingRow of existingRows || []) {
-          const operationId = String(existingRow.mp_operation_id || "").trim();
-          if (operationId) existingOperationIds.add(operationId);
+        const [operationResult, legacyResult] = await Promise.all([
+          supabase
+            .from("transactions")
+            .select("id, external_id, mp_operation_id, occurred_at, mp_external_reference")
+            .eq("user_id", userId)
+            .eq("source", "mercadopago")
+            .in("mp_operation_id", sourceIdBatch),
+          supabase
+            .from("transactions")
+            .select("id, external_id, mp_operation_id, occurred_at, mp_external_reference")
+            .eq("user_id", userId)
+            .eq("source", "mercadopago")
+            .in("external_id", sourceIdBatch.map((sourceId) => "mp-operation:" + sourceId)),
+        ]);
+        if (operationResult.error) throw operationResult.error;
+        if (legacyResult.error) throw legacyResult.error;
+        const existingById = new Map<string, any>();
+        for (const row of [...(operationResult.data || []), ...(legacyResult.data || [])]) {
+          existingById.set(row.id, row);
+        }
+        for (const existingRow of existingById.values()) {
+          const external = String(existingRow.external_id || "");
+          const legacyOperation = external.startsWith("mp-operation:")
+            ? external.slice("mp-operation:".length).split("|", 1)[0]
+            : "";
+          const operationId = String(existingRow.mp_operation_id || legacyOperation).trim();
+          if (!operationId) continue;
+          existingOperationIds.add(operationId);
+          const matching = existingRowsByOperation.get(operationId) || [];
+          matching.push({
+            id: existingRow.id,
+            occurred_at: existingRow.occurred_at,
+            mp_external_reference: existingRow.mp_external_reference,
+          });
+          existingRowsByOperation.set(operationId, matching);
         }
       }
 
       const omittedRows: Record<string, unknown>[] = [];
       const reportKey = report.file_name || String(report.id ?? report.generation_date ?? "report");
+      const existingPatchesById = new Map<string, Record<string, string>>();
       const inserts = rows.flatMap((columns, rowIndex) => {
         const amountCandidates = amountIndexes.map((index) => ({
           value: parseAmount(columns[index]),
@@ -665,8 +781,24 @@ async function syncUserReport(
         const description = (rawDescription || type || "Movimiento Mercado Pago").replace(/\s+/g, " ");
         const sourceId = sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "";
         const reference = referenceIndex >= 0 ? (columns[referenceIndex] || "").trim() : "";
+        const occurredAt = transactionDateTimeIndex >= 0
+          ? parseDateTime(columns[transactionDateTimeIndex])
+          : null;
         const rawTransactionAmount = transactionAmountIndex >= 0 ? (columns[transactionAmountIndex] || "").trim() : "";
         const rawSettlementNetAmount = settlementNetAmountIndex >= 0 ? (columns[settlementNetAmountIndex] || "").trim() : "";
+        if (sourceId) {
+          for (const existingRow of existingRowsByOperation.get(sourceId) || []) {
+            const patch: Record<string, string> = {};
+            if (occurredAt && !existingRow.occurred_at) patch.occurred_at = occurredAt;
+            if (reference && !existingRow.mp_external_reference) patch.mp_external_reference = reference;
+            if (Object.keys(patch).length > 0) {
+              existingPatchesById.set(existingRow.id, {
+                ...(existingPatchesById.get(existingRow.id) || {}),
+                ...patch,
+              });
+            }
+          }
+        }
         const hasRowData = [rawDate, type, rawDescription, sourceId, reference, rawTransactionAmount, rawSettlementNetAmount]
           .some((value) => value !== "");
         if (!hasRowData) return [];
@@ -724,9 +856,29 @@ async function syncUserReport(
           source: "mercadopago",
           external_id: "mp-operation:" + sourceId,
           mp_operation_id: sourceId,
+          mp_external_reference: reference || null,
+          occurred_at: occurredAt,
           needs_review: !found,
         }];
       });
+
+      const patchGroups = new Map<string, string[]>();
+      for (const [transactionId, patch] of existingPatchesById.entries()) {
+        const signature = JSON.stringify(patch);
+        const ids = patchGroups.get(signature) || [];
+        ids.push(transactionId);
+        patchGroups.set(signature, ids);
+      }
+      for (const [signature, ids] of patchGroups.entries()) {
+        for (let offset = 0; offset < ids.length; offset += 100) {
+          const { error: patchError } = await supabase
+            .from("transactions")
+            .update(JSON.parse(signature))
+            .eq("user_id", userId)
+            .in("id", ids.slice(offset, offset + 100));
+          if (patchError) throw patchError;
+        }
+      }
 
       let importedFromReport = 0;
       if (inserts.length > 0) {
@@ -747,6 +899,8 @@ async function syncUserReport(
       skippedCount += Math.max(inserts.length - importedFromReport, 0);
     }
 
+    await syncCounterpartDetails();
+
     const latest = readyReports[readyReports.length - 1];
     const { error: stateSaveError } = await supabase.from("sync_state").upsert({
       id: "mercadopago:" + userId,
@@ -761,7 +915,7 @@ async function syncUserReport(
     const detail = counterpartCount > 0
       ? " Se actualizaron datos de contraparte en " + counterpartCount + " movimientos."
       : counterpartSyncWarning
-        ? " No se pudieron consultar los destinatarios en este intento."
+        ? " No se pudieron consultar los datos del destinatario/destino: " + counterpartSyncWarningMessage
         : "";
     const message = baseMessage + detail;
     await saveSyncStatus(supabase, userId, "success", importedCount, skippedCount, message);
@@ -775,7 +929,7 @@ async function syncUserReport(
         "error",
         0,
         0,
-        "No se pudo completar la consulta a Mercado Pago. Revisá el Access Token y la configuración del reporte.",
+        "No se pudo completar la consulta a Mercado Pago: " + (error instanceof Error ? error.message : "error desconocido"),
       );
     } catch (statusError) {
       console.error("No se pudo guardar el estado de sincronización", userId, statusError);

@@ -44,6 +44,7 @@ create table if not exists gastos.transactions (
   description text not null,
   amount numeric not null check (amount > 0),
   date date not null,
+  occurred_at timestamptz,
   -- Identificador del movimiento de Mercado Pago, para impedir importaciones duplicadas.
   external_id text,
   -- Los movimientos de negocio se conservan, pero pueden excluirse del presupuesto personal.
@@ -71,6 +72,9 @@ alter table gastos.transactions add column if not exists external_id text;
 alter table gastos.transactions add column if not exists mp_operation_id text;
 alter table gastos.transactions add column if not exists counterpart_name text;
 alter table gastos.transactions add column if not exists mp_operation_type text;
+alter table gastos.transactions add column if not exists mp_external_reference text;
+alter table gastos.transactions add column if not exists occurred_at timestamptz;
+alter table gastos.transactions add column if not exists counterpart_account text;
 create index if not exists transactions_user_mp_operation_id_idx
   on gastos.transactions (user_id, mp_operation_id) where mp_operation_id is not null;
 alter table gastos.transactions add column if not exists excluded_from_budget boolean not null default false;
