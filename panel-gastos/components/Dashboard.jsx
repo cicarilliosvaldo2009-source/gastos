@@ -37,6 +37,8 @@ const MP_OMITTED_REASON_LABELS = {
   non_expense: "Importe cero o positivo",
   invalid_amount: "Importe vacío o ilegible",
   invalid_date: "Fecha ilegible",
+  missing_operation_id: "Sin número de movimiento",
+  duplicate_operation_id: "Número de movimiento ya cargado",
 };
 
 const fmtMonth = (date) => {
