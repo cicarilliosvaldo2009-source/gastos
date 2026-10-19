@@ -124,6 +124,30 @@ create table if not exists gastos.mercadopago_sync_status (
 );
 alter table gastos.mercadopago_sync_status enable row level security;
 
+-- Filas de reportes de Mercado Pago que la app no importó como gasto.
+create table if not exists gastos.mercadopago_omitted_rows (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  candidate_key text not null,
+  source_report text,
+  source_id text,
+  external_reference text,
+  operation_type text,
+  description text,
+  raw_transaction_amount text,
+  raw_settlement_net_amount text,
+  selected_amount numeric,
+  raw_date text,
+  transaction_date date,
+  omission_reason text not null check (omission_reason in ('non_expense', 'invalid_amount', 'invalid_date')),
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  unique (user_id, candidate_key)
+);
+alter table gastos.mercadopago_omitted_rows enable row level security;
+create index if not exists mercadopago_omitted_rows_user_last_seen_idx
+  on gastos.mercadopago_omitted_rows (user_id, last_seen_at desc);
+
 
 -- Límite mensual global de gastos, configurable por cada usuario.
 create table if not exists gastos.settings (
@@ -193,6 +217,11 @@ create policy "Users can view their own Mercado Pago sync status"
   for select to authenticated
   using ((select auth.uid()) = user_id);
 
+create policy "Users can view their own Mercado Pago omitted rows"
+  on gastos.mercadopago_omitted_rows
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
+
 create policy "select propios presupuestos mensuales" on gastos.monthly_budgets
   for select to authenticated using ((select auth.uid()) = user_id);
 create policy "insert propios presupuestos mensuales" on gastos.monthly_budgets
@@ -225,6 +254,8 @@ grant select, insert, update, delete on table gastos.categories, gastos.transact
 grant select, insert, delete on table gastos.category_rules to authenticated;
 grant select, insert, update on table gastos.settings, gastos.recurring_expenses, gastos.monthly_budgets to authenticated;
 grant select on table gastos.mercadopago_sync_status to authenticated;
+grant select on table gastos.mercadopago_omitted_rows to authenticated;
+grant all on table gastos.mercadopago_omitted_rows to service_role;
 grant all on all tables in schema gastos to service_role;
 
 revoke all on all sequences in schema gastos from public, anon, authenticated;
@@ -269,6 +300,7 @@ revoke all on table gastos.mercadopago_credentials from public, anon, authentica
 grant select, insert, update, delete on table gastos.mercadopago_credentials to service_role;
 
 revoke all on table gastos.mercadopago_sync_status from public, anon, authenticated;
+revoke all on table gastos.mercadopago_omitted_rows from public, anon, authenticated;
 grant select on table gastos.mercadopago_sync_status to authenticated;
 grant select, insert, update on table gastos.mercadopago_sync_status to service_role;
 
