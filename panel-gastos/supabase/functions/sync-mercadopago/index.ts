@@ -602,6 +602,7 @@ async function syncUserReport(
 
     let importedCount = 0;
     let skippedCount = 0;
+    const seenOperationIds = new Set<string>();
 
     for (const report of readyReports) {
       const fileResponse = await fetch(
@@ -619,7 +620,7 @@ async function syncUserReport(
       const referenceIndex = indexOf("EXTERNAL_REFERENCE") >= 0
         ? indexOf("EXTERNAL_REFERENCE")
         : indexOf("REFERENCE_ID");
-      const amountIndexes = ["SETTLEMENT_NET_AMOUNT", "TRANSACTION_NET_AMOUNT", "TRANSACTION_AMOUNT"]
+      const amountIndexes = ["TRANSACTION_AMOUNT", "TRANSACTION_NET_AMOUNT", "SETTLEMENT_NET_AMOUNT"]
         .map(indexOf)
         .filter((index) => index >= 0);
 
@@ -629,8 +630,27 @@ async function syncUserReport(
 
       const transactionAmountIndex = indexOf("TRANSACTION_AMOUNT");
       const settlementNetAmountIndex = indexOf("SETTLEMENT_NET_AMOUNT");
-      const seen: Record<string, number> = {};
+      const reportSourceIds = [...new Set(rows
+        .map((columns) => sourceIndex >= 0 ? (columns[sourceIndex] || "").trim() : "")
+        .filter((sourceId) => sourceId.length > 0))];
+      const existingOperationIds = new Set<string>();
+      for (let offset = 0; offset < reportSourceIds.length; offset += 100) {
+        const sourceIdBatch = reportSourceIds.slice(offset, offset + 100);
+        const { data: existingRows, error: existingError } = await supabase
+          .from("transactions")
+          .select("mp_operation_id")
+          .eq("user_id", userId)
+          .eq("source", "mercadopago")
+          .in("mp_operation_id", sourceIdBatch);
+        if (existingError) throw existingError;
+        for (const existingRow of existingRows || []) {
+          const operationId = String(existingRow.mp_operation_id || "").trim();
+          if (operationId) existingOperationIds.add(operationId);
+        }
+      }
+
       const omittedRows: Record<string, unknown>[] = [];
+      const reportKey = report.file_name || String(report.id ?? report.generation_date ?? "report");
       const inserts = rows.flatMap((columns, rowIndex) => {
         const amountCandidates = amountIndexes.map((index) => ({
           value: parseAmount(columns[index]),
@@ -651,14 +671,11 @@ async function syncUserReport(
           .some((value) => value !== "");
         if (!hasRowData) return [];
 
-        const identity = sourceId || reference || rawDescription || report.file_name + "|row:" + rowIndex;
-        const amountForKey = amount !== null ? amount.toFixed(2) : selectedAmount?.raw || "";
-        const baseId = identity + "|" + type + "|" + (date || rawDate) + "|" + amountForKey;
-        seen[baseId] = (seen[baseId] || 0) + 1;
-        const candidateKey = seen[baseId] > 1 ? baseId + "#" + seen[baseId] : baseId;
+        // Esta clave solo identifica la fila para la bandeja de revisión.
+        // La deduplicación de gastos usa exclusivamente SOURCE_ID.
         const omittedRecord = {
           user_id: userId,
-          candidate_key: candidateKey,
+          candidate_key: reportKey + "|row:" + rowIndex,
           source_report: report.file_name,
           source_id: sourceId || null,
           external_reference: reference || null,
@@ -684,7 +701,17 @@ async function syncUserReport(
           omittedRows.push({ ...omittedRecord, omission_reason: "invalid_date" });
           return [];
         }
+        if (!sourceId) {
+          omittedRows.push({ ...omittedRecord, omission_reason: "missing_operation_id" });
+          return [];
+        }
+        if (existingOperationIds.has(sourceId) || seenOperationIds.has(sourceId)) {
+          omittedRows.push({ ...omittedRecord, omission_reason: "duplicate_operation_id" });
+          skippedCount += 1;
+          return [];
+        }
 
+        seenOperationIds.add(sourceId);
         const found = (userRules || []).find((rule) =>
           rule.keyword && description.toLowerCase().includes(rule.keyword.toLowerCase())
         );
@@ -695,8 +722,8 @@ async function syncUserReport(
           amount: Math.abs(amount),
           date,
           source: "mercadopago",
-          external_id: candidateKey,
-          mp_operation_id: sourceId || null,
+          external_id: "mp-operation:" + sourceId,
+          mp_operation_id: sourceId,
           needs_review: !found,
         }];
       });
