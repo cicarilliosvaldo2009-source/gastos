@@ -522,3 +522,88 @@ html, body { margin: 0; padding: 0; background: #FAFAF8; }
   font-size: 11.5px;
   line-height: 1.45;
 }
+
+.et-settings-omitted {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+}
+.et-settings-omitted-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.et-settings-omitted-heading {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.et-settings-omitted-heading strong { font-size: 12px; }
+.et-settings-omitted-heading small,
+.et-settings-omitted-row-meta,
+.et-settings-omitted-id { color: var(--muted); font-size: 10.5px; }
+.et-settings-omitted-count {
+  display: grid;
+  min-width: 25px;
+  height: 25px;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+.et-settings-omitted-toggle svg { color: var(--muted); transition: transform .16s ease; }
+.et-settings-omitted-toggle svg.is-open { transform: rotate(180deg); }
+.et-settings-omitted-list {
+  display: grid;
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 0 9px 9px;
+}
+.et-settings-omitted-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.et-settings-omitted-row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.et-settings-omitted-row-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.et-settings-omitted-row-head span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+}
+.et-settings-omitted-amounts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.et-settings-omitted-amounts span { display: grid; gap: 2px; min-width: 0; }
+.et-settings-omitted-amounts small { color: var(--muted); font-size: 9px; }
+.et-settings-omitted-amounts strong { overflow-wrap: anywhere; font-size: 10px; }
+.et-settings-omitted-id { overflow-wrap: anywhere; }
