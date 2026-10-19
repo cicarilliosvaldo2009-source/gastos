@@ -139,7 +139,7 @@ create table if not exists gastos.mercadopago_omitted_rows (
   selected_amount numeric,
   raw_date text,
   transaction_date date,
-  omission_reason text not null check (omission_reason in ('non_expense', 'invalid_amount', 'invalid_date')),
+  omission_reason text not null check (omission_reason in ('non_expense', 'invalid_amount', 'invalid_date', 'missing_operation_id', 'duplicate_operation_id')),
   first_seen_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now(),
   unique (user_id, candidate_key)
