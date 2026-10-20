@@ -311,7 +311,6 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
             { key: "transaction_amount" },
             { key: "counterpart_name" },
             { key: "bank_account" },
-            { key: "external_reference" },
             { key: "provider_id" },
           ],
           file_format: {
@@ -345,7 +344,7 @@ async function configureWithdrawActivityReport(accessToken: string): Promise<str
   if (!structure?.id) throw new Error("Mercado Pago no devolvió la configuración del reporte de transferencias.");
   const requiredColumns = [
     "date_created", "operation_id", "operation_type", "transaction_amount",
-    "counterpart_name", "bank_account", "external_reference", "provider_id",
+    "counterpart_name", "bank_account", "provider_id",
   ];
   const existingColumns = Array.isArray(structure.columns) ? structure.columns : [];
   const existingKeys = new Set(existingColumns.map((column: { key?: string }) => column.key));
